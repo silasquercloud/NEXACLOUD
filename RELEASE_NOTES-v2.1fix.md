@@ -14,8 +14,8 @@ do v0.2.0 continua válida e não precisa ser reinstalada.
   e remove a cópia local.
 - Nenhuma alteração no fluxo de login com navegador: continua abrindo o navegador
   padrão e reconhecendo o redirect do Xbox em Chrome, Edge, Firefox, Brave, Vivaldi e
-  Opera. Quem já instalou o Python no Windows não precisa fazer mais nada; o Python
-  continua sem ser necessário para o próprio app.
+  Opera. Quem já instalou o Python no Windows para essa leitura do histórico não
+  precisa fazer mais nada.
 
 ## Sem alterações
 
