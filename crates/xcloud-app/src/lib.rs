@@ -1,4 +1,4 @@
-//! OpenXCloud desktop client: egui/eframe shell and application controllers.
+//! NexaCloud desktop client: egui/eframe shell and application controllers.
 //! Ports `qt/src/app/*Controller*`, `qt/src/core/Settings`, `qt/src/app/ArtworkProvider`
 //! and the QML screens under `qt/qml/`. The UI reads snapshots and sends commands
 //! through the contract in [`state`]; controllers run on tokio and never touch egui

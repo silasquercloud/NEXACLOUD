@@ -66,13 +66,13 @@ use crate::user_data::{self, UserData, UserDataHandle, UserDataStore};
 const LOG: &str = "App";
 
 /// `ApplicationWindow.title`.
-pub const WINDOW_TITLE: &str = "OpenXCloud";
+pub const WINDOW_TITLE: &str = "NexaCloud";
 /// `width: 1360; height: 900`.
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1360.0, 900.0];
 /// `minimumWidth: 900; minimumHeight: 560`.
 pub const MIN_WINDOW_SIZE: [f32; 2] = [900.0, 560.0];
 /// Reverse-DNS id for the window class / bundle.
-pub const APP_ID: &str = "de.shyim.openxcloud";
+pub const APP_ID: &str = "com.nexacloud.app";
 
 /// The loading screen text (`loadingComponent`).
 pub const LOADING_TEXT: &str = "Starting";
@@ -122,7 +122,7 @@ pub fn play_command(card: &LibraryCard) -> StreamCommand {
 
 // ----------------------------------------------------------------------------- app
 
-/// The OpenXCloud window: Main.qml as an `eframe::App`.
+/// The NexaCloud window: Main.qml as an `eframe::App`.
 pub struct App {
     controllers: Controllers,
     /// `None` on a detached shell (smoke run, tests).
@@ -253,7 +253,7 @@ impl App {
         }
         tracing::info!(
             target: LOG,
-            "OpenXCloud {} ready streamingAvailable={}",
+            "NexaCloud {} ready streamingAvailable={}",
             app.controllers.app_version,
             app.controllers.streaming_available
         );

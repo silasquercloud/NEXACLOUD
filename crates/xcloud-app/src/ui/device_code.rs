@@ -9,6 +9,7 @@
 //! error, sign-out) opens the browser again through the view's opener
 //! (`open::that_detached` on a helper thread by default, a recording closure in tests).
 
+#[cfg(not(windows))]
 use std::process::Command;
 use std::sync::Arc;
 
@@ -22,28 +23,28 @@ use crate::ui::kit::{Button, Tone};
 /// Opens a URL in the system browser (`Qt.openUrlExternally`).
 pub type UrlOpener = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Opens the sign-in page in Chromium. The auth service reads the redirect URL
-/// from Chromium's history, so using a fixed browser keeps the detection reliable
-/// even when another browser is the system default. Runs on a helper thread so the
-/// egui frame never waits on the browser launcher.
+/// Opens the sign-in page in the system's default browser. Any browser works: the
+/// auth service now reads the redirect from Chrome, Edge, Firefox, Brave, Vivaldi or
+/// Opera profiles on Windows, Linux and macOS. Runs on a helper thread so the egui
+/// frame never waits on the browser launcher.
 fn system_opener() -> UrlOpener {
     Arc::new(|url: &str| {
         let url = url.to_owned();
         let spawned = std::thread::Builder::new()
             .name("open-sign-in-page".into())
             .spawn(move || {
-                let chromium = Command::new("chromium")
-                    .arg("--new-window")
-                    .arg(&url)
-                    .spawn();
-                match chromium {
-                    Ok(mut child) => {
-                        let _ = child.wait();
-                    }
-                    Err(error) => {
-                        tracing::warn!(target: "Auth", "chromium failed ({error}); trying default browser");
-                        if let Err(error) = open::that_detached(&url) {
-                            tracing::warn!(target: "Auth", "could not open sign-in page {url}: {error}");
+                if let Err(error) = open::that_detached(&url) {
+                    tracing::warn!(target: "Auth", "could not open sign-in page {url} in the default browser: {error}");
+                    // Last resort on Linux: Chromium may be installed even when the
+                    // default handler is misconfigured.
+                    #[cfg(not(windows))]
+                    {
+                        if let Err(error) = Command::new("chromium")
+                            .arg("--new-window")
+                            .arg(&url)
+                            .spawn()
+                        {
+                            tracing::warn!(target: "Auth", "chromium fallback failed: {error}");
                         }
                     }
                 }

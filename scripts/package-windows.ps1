@@ -1,4 +1,4 @@
-# Builds a self-contained Windows ZIP with the OpenXCloud .exe.
+# Builds a self-contained Windows ZIP with the NexaCloud .exe.
 # Run on windows-latest after installing ffmpeg through vcpkg (see desktop.yml).
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
@@ -27,7 +27,7 @@ if (Test-Path $ffmpegBin) {
   }
 }
 
-$zip = Join-Path (Resolve-Path '.') 'dist/OpenXCloud-windows-x86_64.zip'
+$zip = Join-Path (Resolve-Path '.') 'dist/NexaCloud-windows-x86_64.zip'
 New-Item -ItemType Directory -Force -Path (Split-Path $zip) | Out-Null
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip

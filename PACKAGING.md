@@ -1,5 +1,12 @@
 # Native packages
 
+> **NexaCloud 0.2.0 (local test build).** On this Arch/Omarchy machine the
+> system lacks `libclang`, so bindgen uses the manually installed wheel:
+> `bash scripts/build-linux-local.sh` sets `LIBCLANG_PATH`, `FFMPEG_DIR` and
+> `BINDGEN_EXTRA_CLANG_ARGS` (the same shims as the Windows build). To assemble
+> the portable Linux artifact: `bash scripts/package-linux-local.sh`.
+> The 0.2.0 build is for local testing only and is not published.
+
 We use [cargo-bundle](https://github.com/burtonageo/cargo-bundle), pinned to 0.12.0.
 Run packaging from a checkout on the target OS:
 

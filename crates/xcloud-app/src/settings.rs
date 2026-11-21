@@ -50,7 +50,9 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 /// `Settings::resolutionProfile` values the panel offers (`StreamResolutionMode`).
 pub const RESOLUTION_PROFILES: [&str; 5] = ["auto", "720p", "1080p", "1440p", "1080pHQ"];
 /// `Settings::preferredFrameRate` values the panel offers.
-pub const FRAME_RATES: [i32; 2] = [30, 60];
+/// xCloud usually delivers 60 fps; 120/240 are offered for displays and hosts
+/// that negotiate a higher cap. The known-good 60 remains the default.
+pub const FRAME_RATES: [i32; 4] = [30, 60, 120, 240];
 /// `AppSettings::present_mode` values: lowest latency first.
 pub const PRESENT_MODES: [&str; 2] = ["immediate", "fifo"];
 /// `AppSettings::upscaler` values (`xcloud_gpu::Upscaler::as_str`): FSR 1.0 (default) and
@@ -556,7 +558,7 @@ mod tests {
         assert_eq!(json["input"]["swapAB"], false);
         assert_eq!(json["input"]["triggerSensitivity"], 0.5);
         assert_eq!(json["input"]["vibrationIntensity"], 1.0);
-        assert_eq!(json["render"]["presentMode"], "immediate");
+        assert_eq!(json["render"]["presentMode"], "fifo");
         assert_eq!(json["render"]["upscaleEnabled"], true);
         assert_eq!(json["render"]["upscaler"], "fsr");
     }

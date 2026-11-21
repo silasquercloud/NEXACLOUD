@@ -53,7 +53,7 @@ pub const LPT_SCOPE: &str =
     "service::http://Passport.NET/purpose::PURPOSE_XBOX_CLOUD_CONSOLE_TRANSFER_TOKEN";
 
 /// Redirect registered by the xbox.com web client. The browser lands here with
-/// `?code=...`; the app reads that URL from Chromium's history, so the user only
+/// `?code=...`; the app reads that URL from the browser profile, so the user only
 /// has to sign in normally in the browser — no device code, no copying.
 pub const INTERACTIVE_REDIRECT_URI: &str = "https://www.xbox.com/auth/msa/blank.html";
 const AUTHORIZE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
@@ -108,18 +108,93 @@ pub struct InteractiveLogin {
     state: String,
 }
 
-/// Chromium profile history databases, newest first. Only these are inspected,
-/// and only for the exact xbox.com sign-in redirect URL.
-fn chromium_history_files() -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-    let base = PathBuf::from(home).join(".config/chromium");
+/// Candidate profile roots that may hold the xbox.com sign-in redirect.
+///
+/// The redirect URI is fixed by the xbox.com SPA registration, so the app has to read
+/// the URL back from the browser profile. Every major Chromium-based browser and
+/// Firefox is covered on Windows, Linux and macOS: whichever browser the user
+/// actually has is detected, with no requirement to install or pick Chromium.
+fn browser_profile_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut add = |path: PathBuf| {
+        if path.is_dir() {
+            roots.push(path);
+        }
+    };
+
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        for child in [
+            "Google\\Chrome\\User Data",
+            "Microsoft\\Edge\\User Data",
+            "BraveSoftware\\Brave-Browser\\User Data",
+            "Chromium\\User Data",
+            "Vivaldi\\User Data",
+            "Opera Software\\Opera Stable",
+        ] {
+            add(local.join(child));
+        }
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        add(PathBuf::from(appdata).join("Mozilla\\Firefox\\Profiles"));
+    }
+
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    if let Some(home) = home {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        for child in [
+            "chromium",
+            "google-chrome",
+            "microsoft-edge",
+            "BraveSoftware/Brave-Browser",
+            "vivaldi",
+            "opera",
+        ] {
+            add(config.join(child));
+        }
+        add(home.join(".mozilla/firefox"));
+        let support = home.join("Library/Application Support");
+        for child in [
+            "Google/Chrome",
+            "Microsoft Edge",
+            "BraveSoftware/Brave-Browser",
+            "Vivaldi",
+            "Firefox/Profiles",
+        ] {
+            add(support.join(child));
+        }
+    }
+    roots
+}
+
+/// Collect `History` (Chromium) and `places.sqlite` (Firefox) databases under each
+/// profile root, newest first. Depth is bounded so unrelated files are never touched.
+fn browser_history_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&base) {
-        for entry in entries.flatten() {
-            let candidate = entry.path().join("History");
-            if candidate.is_file() {
-                files.push(candidate);
+    for root in browser_profile_roots() {
+        let mut level = vec![root];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for dir in level {
+                let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        next.push(path);
+                    } else if matches!(
+                        path.file_name().and_then(|n| n.to_str()),
+                        Some("History") | Some("places.sqlite")
+                    ) && path.is_file()
+                    {
+                        files.push(path);
+                    }
+                }
             }
+            level = next;
         }
     }
     files.sort_by_key(|path| {
@@ -131,8 +206,26 @@ fn chromium_history_files() -> Vec<PathBuf> {
     files
 }
 
-/// Read the newest `blank.html?code=...` URL from one Chromium history database.
-/// The copy (including WAL) keeps SQLite from fighting the running browser.
+/// Python interpreters to try, in platform order. Windows rarely exposes `python3`
+/// on PATH; `py -3` and `python` are the usual entry points.
+fn python_commands() -> Vec<(&'static str, Vec<&'static str>)> {
+    #[cfg(windows)]
+    {
+        vec![
+            ("py", vec!["-3", "-c"]),
+            ("python", vec!["-c"]),
+            ("python3", vec!["-c"]),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![("python3", vec!["-c"]), ("python", vec!["-c"])]
+    }
+}
+
+/// Read the newest `blank.html?code=...` URL from one browser history database.
+/// Works for both Chromium's `urls` table and Firefox's `moz_places`. The copy
+/// (including WAL/SHM) keeps SQLite from fighting the running browser.
 fn latest_auth_callback(
     history: &Path,
     scratch: &Path,
@@ -141,7 +234,7 @@ fn latest_auth_callback(
     const SCRIPT: &str = r#"
 import json, os, shutil, sqlite3, sys
 src, tmp = sys.argv[1], sys.argv[2]
-dst = os.path.join(tmp, "History")
+dst = os.path.join(tmp, "history-copy")
 for suffix in ("", "-wal", "-shm"):
     try:
         os.remove(dst + suffix)
@@ -153,46 +246,60 @@ for suffix in ("", "-wal", "-shm"):
         pass
 con = sqlite3.connect(dst)
 try:
-    rows = con.execute(
-        "select url from urls where url like ? order by last_visit_time desc limit 30",
-        ("https://www.xbox.com/auth/msa/blank.html?%",),
-    ).fetchall()
+    tables = {row[0] for row in con.execute("select name from sqlite_master where type='table'")}
+    pattern = "https://www.xbox.com/auth/msa/blank.html?%"
+    urls = []
+    if "urls" in tables:
+        urls += [row[0] for row in con.execute(
+            "select url from urls where url like ? order by last_visit_time desc limit 50", (pattern,))]
+    if "moz_places" in tables:
+        urls += [row[0] for row in con.execute(
+            "select url from moz_places where url like ? order by last_visit_date desc limit 50", (pattern,))]
 finally:
     con.close()
-print(json.dumps([row[0] for row in rows]))
+print(json.dumps(urls))
 "#;
 
-    let output = Command::new("python3")
-        .arg("-c")
-        .arg(SCRIPT)
-        .arg(history)
-        .arg(scratch)
-        .output()
-        .map_err(|e| Error::Auth(format!("Cannot read Chromium history: {e}")))?;
-    if !output.status.success() {
-        return Err(Error::Auth(format!(
-            "Chromium history query failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let urls: Vec<String> = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-        .map_err(|e| Error::Auth(format!("Invalid Chromium history result: {e}")))?;
-    for url in urls {
-        let Ok(parsed) = url::Url::parse(&url) else { continue };
-        let mut state = "";
-        let mut code = None;
-        for (key, value) in parsed.query_pairs() {
-            match key.as_ref() {
-                "state" if value.as_ref() == expected_state => state = "match",
-                "code" => code = Some(value.into_owned()),
-                _ => {}
+    let mut last_error = String::new();
+    for (program, prefix) in python_commands() {
+        let mut command = Command::new(program);
+        command.args(&prefix).arg(SCRIPT).arg(history).arg(scratch);
+        let output = match command.output() {
+            Ok(output) => output,
+            Err(error) => {
+                last_error = format!("{program}: {error}");
+                continue;
+            }
+        };
+        if !output.status.success() {
+            last_error = format!(
+                "{program}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            continue;
+        }
+        let urls: Vec<String> = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+            .map_err(|e| Error::Auth(format!("Invalid browser history result: {e}")))?;
+        for url in urls {
+            let Ok(parsed) = url::Url::parse(&url) else { continue };
+            let mut state_match = false;
+            let mut code = None;
+            for (key, value) in parsed.query_pairs() {
+                match key.as_ref() {
+                    "state" if value.as_ref() == expected_state => state_match = true,
+                    "code" => code = Some(value.into_owned()),
+                    _ => {}
+                }
+            }
+            if state_match {
+                return Ok(code);
             }
         }
-        if state == "match" {
-            return Ok(code);
-        }
+        return Ok(None);
     }
-    Ok(None)
+    Err(Error::Auth(format!(
+        "Cannot read browser history (tried Python interpreters): {last_error}"
+    )))
 }
 
 /// Result of one GSSV offering login (`gssvLogin`): gsToken, base host, regions.
@@ -234,7 +341,7 @@ impl MicrosoftAuthService {
     /// Start an interactive browser sign-in with the xbox.com web client: build the
     /// Microsoft authorize URL with PKCE and a random state. The browser does the
     /// sign-in and redirects to `https://www.xbox.com/auth/msa/blank.html?code=...`;
-    /// [`Self::wait_for_interactive_code`] reads that URL from Chromium's history.
+    /// [`Self::wait_for_interactive_code`] reads that URL from any browser's history.
     pub fn begin_interactive_login(&self) -> Result<InteractiveLogin> {
         // 96 hex characters: a valid PKCE verifier (43-128 unreserved characters).
         let verifier = format!(
@@ -271,7 +378,7 @@ impl MicrosoftAuthService {
         })
     }
 
-    /// Poll Chromium's history for the xbox.com redirect that carries the code.
+    /// Poll every installed browser's history for the xbox.com redirect with the code.
     /// The URL is only read after the user completes the normal Microsoft sign-in,
     /// so there is no code to type and no device-code approval.
     pub async fn wait_for_interactive_code(
@@ -287,10 +394,10 @@ impl MicrosoftAuthService {
         if let Err(error) = std::fs::create_dir_all(&scratch) {
             tracing::warn!(target: LOG_TARGET, error = %error, "cannot create history scratch dir");
         }
-        tracing::info!(target: LOG_TARGET, "waiting for the xbox.com sign-in redirect in Chromium");
+        tracing::info!(target: LOG_TARGET, "waiting for the xbox.com sign-in redirect in any browser");
 
         loop {
-            for history in chromium_history_files() {
+            for history in browser_history_files() {
                 match latest_auth_callback(&history, &scratch, &login.state) {
                     Ok(Some(code)) => {
                         let _ = std::fs::remove_dir_all(&scratch);
@@ -303,7 +410,7 @@ impl MicrosoftAuthService {
             if Instant::now() >= deadline {
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(Error::Timeout(
-                    "Browser sign-in timed out. Check that Chromium opened the Microsoft page and finish signing in."
+                    "Browser sign-in timed out. Finish signing in in the browser that opened, then try again."
                         .to_owned(),
                 ));
             }

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use egui::{
     Color32, ColorImage, CornerRadius, EventFilter, Id, Key, KeyboardShortcut, Modifiers, Rect,
     Response, Role, Sense, TextureHandle, TextureOptions, Vec2, ViewportCommand, WidgetInfo, pos2,
-    vec2,
+    vec2, Widget,
 };
 use egui_wgpu::CallbackTrait;
 use parking_lot::RwLock;
@@ -66,6 +66,10 @@ const HERO_OPACITY: f32 = 0.55;
 /// How often timing-only changes (`gpu_ms`, `frame_age_ms`, `present_ms`) are reported
 /// with `SetOutput`; size/upscale changes go out immediately.
 const OUTPUT_REPORT_INTERVAL_SECS: f64 = 0.5;
+/// Sensitivity applied to raw pointer motion before sending it as a relative mouse
+/// delta. xCloud expects movement in server pixels; tune here if the camera feels
+/// too fast or too slow.
+const MOUSE_SENSITIVITY: f32 = 1.0;
 /// The text shown next to the HUD toggle when no physical controller is connected.
 pub const KEYBOARD_HINT: &str = "Keyboard · WASD / R F triggers";
 /// Accessible labels (`RoundIcon.label`), also what the tests query.
@@ -709,11 +713,13 @@ struct KeyEvent {
 }
 
 /// Local hotkeys pulled out of egui before any game input is forwarded.
-/// F1 toggles the in-game menu; Escape closes it.
+/// F1 toggles the in-game menu, Escape closes it, F8 toggles keyboard/mouse mode
+/// (the same shortcut xCloud uses to switch into native keyboard + mouse).
 #[derive(Debug, Clone, Copy, Default)]
 struct MenuKeys {
     f1: bool,
     escape: bool,
+    f8: bool,
 }
 
 fn take_menu_keys(input: &mut egui::InputState, menu_open: bool) -> MenuKeys {
@@ -723,18 +729,33 @@ fn take_menu_keys(input: &mut egui::InputState, menu_open: bool) -> MenuKeys {
             key, pressed, repeat, ..
         } = event
         {
-            if *pressed && !*repeat {
-                match key {
+            if !*repeat {
+                // Swallow the release too: a local-only key must never reach the
+                // cloud PC as a dangling key-up (F8 VKey 119 was being forwarded).
+                let local = match key {
                     Key::F1 => {
-                        keys.f1 = true;
-                        return false;
+                        if *pressed {
+                            keys.f1 = true;
+                        }
+                        true
+                    }
+                    Key::F8 => {
+                        if *pressed {
+                            keys.f8 = true;
+                        }
+                        true
                     }
                     // Escape is a normal game key unless the menu is open.
                     Key::Escape if menu_open => {
-                        keys.escape = true;
-                        return false;
+                        if *pressed {
+                            keys.escape = true;
+                        }
+                        true
                     }
-                    _ => {}
+                    _ => false,
+                };
+                if local {
+                    return false;
                 }
             }
         }
@@ -856,6 +877,9 @@ pub struct StreamView {
     last_report: Option<OutputReport>,
     /// Last native mouse position (server pixels) + button bitmask sent, to avoid flooding.
     last_mouse: (u32, u32, u8),
+    /// Whether the OS cursor is currently grabbed/hidden over the stream surface
+    /// (F8 keyboard/mouse mode): raw relative motion drives the game camera.
+    relative_mode: bool,
     /// In-game overlay menu, toggled with F1 (never forwarded to the cloud PC).
     menu_open: bool,
     /// Wall-clock instant the current cloud session connected (for the session timer).
@@ -889,6 +913,7 @@ impl StreamView {
             last_output: None,
             last_report: None,
             last_mouse: (u32::MAX, u32::MAX, u8::MAX),
+            relative_mode: false,
             menu_open: false,
             session_start: None,
             // Fortnite and most xCloud titles support native keyboard/mouse; enable it
@@ -989,15 +1014,27 @@ impl StreamView {
                 .send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
         }
         // Local hotkeys: F1 toggles the in-game menu (never reaches the cloud PC),
-        // Escape closes it. Only listen while the stream is connected.
+        // Escape closes it, F8 toggles native keyboard/mouse (xCloud's shortcut).
+        // Only listen while the stream is connected.
         if connected {
             let menu_open = self.menu_open;
             let menu_keys = ctx.input_mut(|i| take_menu_keys(i, menu_open));
             if menu_keys.f1 {
                 self.menu_open = !self.menu_open;
+                if self.menu_open {
+                    self.release_pointer(&ctx);
+                }
             }
             if menu_keys.escape && self.menu_open {
                 self.menu_open = false;
+            }
+            if menu_keys.f8 {
+                self.native_input = !self.native_input;
+                self.stream
+                    .send(StreamCommand::SetNativeInputEnabled(self.native_input));
+                if !self.native_input {
+                    self.release_pointer(&ctx);
+                }
             }
         }
         if self.input_focused() {
@@ -1011,6 +1048,7 @@ impl StreamView {
             self.last_mouse = (u32::MAX, u32::MAX, u8::MAX);
             self.menu_open = false;
         } else if !connected && self.was_connected {
+            self.release_pointer(&ctx);
             self.session_start = None;
             self.menu_open = false;
         }
@@ -1045,6 +1083,11 @@ impl StreamView {
         if surface.clicked() {
             self.request_activate(&ctx);
             if connected {
+                // Clicking the game surface in native keyboard/mouse mode locks the
+                // cursor so raw motion turns the camera (xCloud F8 behaviour).
+                if self.native_input && !self.menu_open {
+                    self.grab_pointer(&ctx);
+                }
                 self.show_controls = !self.show_controls;
                 if self.show_controls {
                     self.controls_since = now;
@@ -1075,40 +1118,84 @@ impl StreamView {
         // Keep the timer ticking while the menu is open.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        let width: f32 = 320.0;
-        let height: f32 = 236.0;
-        let center = area.center();
-        let rect = Rect::from_center_size(
-            center,
-            vec2(width.min(area.width() - 24.0), height.min(area.height() - 24.0)),
+        // A lateral "control centre" rail, anchored to the right edge like the
+        // PS5-style quick menu: the game stays visible on the left.
+        let margin = 18.0;
+        let width = 360.0f32.min(area.width() - margin * 2.0);
+        let height = (area.height() - margin * 2.0).min(560.0);
+        let rect = Rect::from_min_max(
+            pos2(area.right() - margin - width, area.top() + margin),
+            pos2(area.right() - margin, area.top() + margin + height),
         );
 
-        // Dim the game behind the menu and draw the panel.
-        ui.painter().rect_filled(area, 0.0, Color32::from_black_alpha(150));
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(12), Color32::from_rgba_premultiplied(18, 20, 26, 245));
+        ui.painter().rect_filled(area, 0.0, Color32::from_black_alpha(140));
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_LARGE as u8),
+            theme::SURFACE_GLASS,
+        );
         ui.painter().rect_stroke(
             rect,
-            CornerRadius::same(12),
-            (1.5, Color32::from_rgb(70, 130, 180)),
+            CornerRadius::same(theme::RADIUS_LARGE as u8),
+            (1.0, theme::BORDER),
             egui::StrokeKind::Inside,
         );
+        // Thin blue edge: the PS5 control-centre accent.
+        ui.painter().rect_filled(
+            Rect::from_min_max(rect.min, pos2(rect.min.x + 3.0, rect.max.y)),
+            CornerRadius::same(2),
+            theme::ACCENT,
+        );
+
+        // Full-width toggle row; selected rows use the white-on-blue PS5 treatment.
+        fn menu_toggle(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
+            let fill = if on { theme::ACCENT } else { theme::SURFACE_HIGH };
+            let text = if on { theme::ON_ACCENT } else { theme::TEXT_PRIMARY };
+            egui::Button::new(
+                egui::RichText::new(format!("{label}: {}", if on { "ON" } else { "OFF" }))
+                    .size(14.0)
+                    .strong()
+                    .color(text),
+            )
+            .fill(fill)
+            .min_size(vec2(ui.available_width(), 40.0))
+            .ui(ui)
+            .clicked()
+        }
 
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        child.add_space(14.0);
+        child.add_space(18.0);
         child.horizontal(|h| {
-            h.add_space(16.0);
-            h.label(egui::RichText::new("xCloud Menu").size(20.0).strong().color(Color32::WHITE));
+            h.add_space(20.0);
+            h.label(
+                egui::RichText::new("NEXACLOUD")
+                    .size(22.0)
+                    .strong()
+                    .color(theme::TEXT_PRIMARY),
+            );
             h.add_space(8.0);
-            h.label(egui::RichText::new("F1").size(12.0).color(Color32::from_gray(150)));
+            h.label(
+                egui::RichText::new("F1")
+                    .size(12.0)
+                    .color(theme::TEXT_TERTIARY),
+            );
         });
-        child.add_space(6.0);
+        child.add_space(2.0);
+        child.horizontal(|h| {
+            h.add_space(20.0);
+            h.label(
+                egui::RichText::new("CONTROL CENTER")
+                    .size(11.0)
+                    .color(theme::ACCENT_LIGHT),
+            );
+        });
+        child.add_space(12.0);
         child.separator();
-        child.add_space(6.0);
+        child.add_space(12.0);
 
         // Session timer.
         let elapsed = self
@@ -1118,55 +1205,94 @@ impl StreamView {
         let secs = elapsed.as_secs();
         let timer = format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60);
         child.horizontal(|h| {
-            h.add_space(16.0);
-            h.label(egui::RichText::new("Session time").size(13.0).color(Color32::from_gray(170)));
+            h.add_space(20.0);
+            h.label(
+                egui::RichText::new("Session time")
+                    .size(13.0)
+                    .color(theme::TEXT_SECONDARY),
+            );
             h.add_space(8.0);
-            h.label(egui::RichText::new(&timer).size(15.0).strong().color(Color32::from_rgb(120, 200, 255)));
+            h.label(
+                egui::RichText::new(&timer)
+                    .size(16.0)
+                    .strong()
+                    .color(theme::ACCENT_LIGHT),
+            );
         });
         child.add_space(4.0);
         child.horizontal(|h| {
-            h.add_space(16.0);
+            h.add_space(20.0);
             h.label(
                 egui::RichText::new(format!(
                     "{} · {:.0} fps",
                     snapshot.title_name, snapshot.stats.frames_per_second
                 ))
                 .size(11.0)
-                .color(Color32::from_gray(130)),
+                .color(theme::TEXT_TERTIARY),
             );
         });
-        child.add_space(10.0);
+        child.add_space(14.0);
         child.separator();
-        child.add_space(8.0);
+        child.add_space(14.0);
 
-        // Stats toggle ("estatísticas").
         child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button(if snapshot.hud_enabled { "Estatísticas: ON" } else { "Estatísticas: OFF" }).clicked() {
-                self.stream.send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
+            h.add_space(20.0);
+            if menu_toggle(h, "Estatísticas", snapshot.hud_enabled) {
+                self.stream
+                    .send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
             }
         });
-        child.add_space(8.0);
+        child.add_space(10.0);
 
-        // Native keyboard/mouse toggle.
         child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button(if self.native_input { "Teclado/mouse nativo: ON" } else { "Teclado/mouse nativo: OFF" }).clicked() {
+            h.add_space(20.0);
+            if menu_toggle(h, "Teclado/mouse nativo", self.native_input) {
                 self.native_input = !self.native_input;
-                self.stream.send(StreamCommand::SetNativeInputEnabled(self.native_input));
+                self.stream
+                    .send(StreamCommand::SetNativeInputEnabled(self.native_input));
             }
         });
-        child.add_space(8.0);
+        child.add_space(10.0);
 
-        // Stop stream / close menu.
+        // Upscaling is edited through the shared settings so the GPU path picks
+        // it up on the next frame and App persists it like the settings sheet.
+        let upscale_on = self.settings.read().upscale_enabled;
         child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button("Sair da sessão").clicked() {
+            h.add_space(20.0);
+            if menu_toggle(h, "Upscale", upscale_on) {
+                let mut settings = self.settings.write();
+                settings.upscale_enabled = !upscale_on;
+                let updated = settings.clone();
+                drop(settings);
+                self.stream.send(StreamCommand::ApplySettings(updated));
+            }
+        });
+        child.add_space(6.0);
+        child.horizontal(|h| {
+            h.add_space(20.0);
+            let target = self.settings.read().upscale_height;
+            h.label(
+                egui::RichText::new(format!("Destino: {target}p · FSR"))
+                    .size(11.0)
+                    .color(theme::TEXT_TERTIARY),
+            );
+        });
+
+        // Push the actions to the bottom of the rail.
+        let remaining = rect.max.y - 62.0 - child.cursor().min.y;
+        if remaining > 0.0 {
+            child.add_space(remaining);
+        }
+        child.separator();
+        child.add_space(10.0);
+        child.horizontal(|h| {
+            h.add_space(20.0);
+            if h.button(egui::RichText::new("Sair da sessão").color(theme::DANGER)).clicked() {
                 self.stream.send(StreamCommand::StopStreaming);
                 self.menu_open = false;
             }
             h.add_space(8.0);
-            if h.button("Fechar menu").clicked() {
+            if h.button("Fechar").clicked() {
                 self.menu_open = false;
             }
         });
@@ -1174,6 +1300,20 @@ impl StreamView {
 
     fn surface_id(&self) -> Id {
         self.id.with("surface")
+    }
+
+    /// Enables raw relative mouse reports. No `CursorGrab` viewport command: on
+    /// Wayland/Hyprland locking the pointer stalls surface presentation and the
+    /// video decode path (the stream freezes while audio keeps running). Raw
+    /// motion over the game surface is still enough to turn the camera.
+    fn grab_pointer(&mut self, _ctx: &egui::Context) {
+        self.relative_mode = true;
+    }
+
+    /// Back to absolute coordinates when the overlay opens, focus is lost, or the
+    /// stream ends.
+    fn release_pointer(&mut self, _ctx: &egui::Context) {
+        self.relative_mode = false;
     }
 
     /// `Window.window.requestActivate()` + `root.forceActiveFocus()`.
@@ -1222,6 +1362,7 @@ impl StreamView {
             // Component.onCompleted: requestActivate(); forceActiveFocus().
             self.request_activate(ctx);
         } else {
+            self.release_pointer(ctx);
             self.pressed_keys.clear();
             if !first {
                 self.stream.send(StreamCommand::ReleaseAll);
@@ -1282,10 +1423,67 @@ impl StreamView {
     }
 
     /// Sends native mouse movement and button state over the xCloud `MOUSE` report.
-    /// Coordinates are relative to the video surface, scaled to the negotiated
-    /// server resolution, which is what the cloud client expects.
+    ///
+    /// When the pointer is grabbed (F8 keyboard/mouse mode) we forward *raw relative
+    /// motion*: the game turns the camera exactly like xCloud's native mouse mode,
+    /// instead of the cursor hitting the edge of the screen. Deltas are signed and
+    /// written to the wire as little-endian two's-complement `u32`, matching the
+    /// browser client's `Int32Array` view of the same 18-byte mouse entry.
+    /// Without a grab we fall back to absolute surface coordinates (click-to-focus).
     fn handle_native_mouse(&mut self, ctx: &egui::Context, surface: &Response, area: Rect) {
-        let Some(pos) = surface.hover_pos() else {
+        let (buttons, motion, wheel, absolute) = ctx.input(|i| {
+            let mut buttons = 0u8;
+            if i.pointer.button_down(egui::PointerButton::Primary) {
+                buttons |= 1;
+            }
+            if i.pointer.button_down(egui::PointerButton::Secondary) {
+                buttons |= 2;
+            }
+            if i.pointer.button_down(egui::PointerButton::Middle) {
+                buttons |= 4;
+            }
+            let motion = i.pointer.motion().unwrap_or_default();
+            let mut wheel_x = 0f32;
+            let mut wheel_y = 0f32;
+            for event in &i.events {
+                if let egui::Event::MouseWheel { delta, unit, .. } = event {
+                    // Normalise all wheel units to Windows WHEEL_DELTA (120/notch).
+                    let scale = match unit {
+                        egui::MouseWheelUnit::Line => 120.0,
+                        egui::MouseWheelUnit::Page => 360.0,
+                        egui::MouseWheelUnit::Point => 8.0,
+                    };
+                    wheel_x += delta.x * scale;
+                    wheel_y += delta.y * scale;
+                }
+            }
+            let absolute = surface.hover_pos();
+            (buttons, motion, (wheel_x, wheel_y), absolute)
+        });
+
+        if self.relative_mode {
+            // Raw relative mode. Keep a steady report for button/wheel changes even
+            // when the mouse did not move this frame.
+            if motion == Vec2::ZERO && wheel.0 == 0.0 && wheel.1 == 0.0 && buttons == self.last_mouse.2 {
+                return;
+            }
+            let dx = (motion.x * MOUSE_SENSITIVITY) as i32;
+            let dy = (motion.y * MOUSE_SENSITIVITY) as i32;
+            self.last_mouse = (dx as u32, dy as u32, buttons);
+            self.stream.send(StreamCommand::NativeMouse {
+                x: dx as u32,
+                y: dy as u32,
+                wheel_x: wheel.0 as i32 as u32,
+                wheel_y: wheel.1 as i32 as u32,
+                buttons,
+                relative: true,
+            });
+            return;
+        }
+
+        // Absolute fallback (no pointer lock yet): position over the video surface
+        // scaled to the negotiated server resolution, as before.
+        let Some(pos) = absolute else {
             return;
         };
         let snapshot = self.stream.read();
@@ -1297,19 +1495,6 @@ impl StreamView {
         }
         let x = ((pos.x - area.left()) / area.width() * w).clamp(0.0, w - 1.0) as u32;
         let y = ((pos.y - area.top()) / area.height() * h).clamp(0.0, h - 1.0) as u32;
-
-        let mut buttons = 0u8;
-        ctx.input(|i| {
-            if i.pointer.button_down(egui::PointerButton::Primary) {
-                buttons |= 1;
-            }
-            if i.pointer.button_down(egui::PointerButton::Secondary) {
-                buttons |= 2;
-            }
-            if i.pointer.button_down(egui::PointerButton::Middle) {
-                buttons |= 4;
-            }
-        });
 
         if (x, y, buttons) != self.last_mouse {
             self.last_mouse = (x, y, buttons);
@@ -2055,6 +2240,67 @@ mod tests {
             }),
             "{commands:?}"
         );
+    }
+
+    #[test]
+    fn grabbed_pointer_sends_relative_mouse_motion() {
+        let Fixture { mut view, rx, .. } = fixture(connected());
+        // Simulate F8 mode: native input on and cursor grabbed to the surface.
+        // The fixture opts out of native input, so turn it back on via the command
+        // the F8 hotkey would send, then grab the pointer.
+        view.native_input = true;
+        view.relative_mode = true;
+        let mut h = harness(&mut view);
+        h.run();
+        drain(&rx);
+
+        // Raw motion is forwarded as a relative MOUSE report with signed deltas
+        // encoded in two's complement, so the cloud game turns the camera.
+        h.event(egui::Event::MouseMoved(vec2(12.0, -7.0)));
+        h.step();
+        let commands = drain(&rx);
+        let mouse = commands.iter().find_map(|c| match c {
+            StreamCommand::NativeMouse { .. } => Some(c),
+            _ => None,
+        });
+        match mouse {
+            Some(StreamCommand::NativeMouse {
+                x,
+                y,
+                relative,
+                buttons,
+                ..
+            }) => {
+                assert!(*relative, "grabbed pointer must use relative mode");
+                assert_eq!(*x, 12, "positive delta X");
+                assert_eq!(*y, (-7i32) as u32, "negative delta Y in two's complement");
+                assert_eq!(*buttons, 0);
+            }
+            other => panic!("expected relative NativeMouse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn f8_toggles_native_input_without_forwarding_it() {
+        let Fixture { mut view, rx, .. } = fixture(connected());
+        assert!(!view.native_input);
+        let mut h = harness(&mut view);
+        h.run();
+        drain(&rx);
+
+        // The fixture starts with native input off; F8 turns it on locally and
+        // is never forwarded to the cloud PC (xCloud's keyboard/mouse shortcut).
+        h.key_press(Key::F8);
+        h.step();
+        assert_eq!(drain(&rx), [StreamCommand::SetNativeInputEnabled(true)]);
+
+        h.key_press(Key::F8);
+        h.step();
+        assert_eq!(drain(&rx), [StreamCommand::SetNativeInputEnabled(false)]);
+
+        // Release the harness borrow before inspecting the view directly.
+        drop(h);
+        assert!(!view.native_input);
     }
 
     #[test]

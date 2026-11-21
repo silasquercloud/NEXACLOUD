@@ -394,7 +394,9 @@ impl Default for AppSettings {
             // `Settings::triggerSensitivity()` defaults to 0.5 (core/Settings.cpp:89).
             trigger_sensitivity: 0.5,
             vibration_intensity: 1.0,
-            present_mode: "immediate".into(),
+            // Fifo is the safe default on Linux/GL (the only mode many GL drivers
+            // support). The settings panel can turn VSync off -> "immediate".
+            present_mode: "fifo".into(),
             upscale_enabled: true,
             upscale_height: 2160,
             sharpness: 0.25,

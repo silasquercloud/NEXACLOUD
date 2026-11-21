@@ -77,17 +77,30 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
 
     match icon {
         Icon::Logo => {
-            // A rounded tile with a cloud-play mark: the OpenXCloud badge.
+            // The NexaCloud badge: a rounded navy tile with a blue cloud and a
+            // white play mark cut into its core (matches the app icon).
             let badge = r(1.0, 1.0, 23.0, 23.0);
             painter.rect_filled(
                 badge,
                 egui::CornerRadius::same((7.0 * s) as u8),
-                crate::theme::ACCENT,
+                crate::theme::SURFACE,
             );
-            let ink = crate::theme::ON_ACCENT;
+            painter.rect_stroke(
+                badge,
+                egui::CornerRadius::same((7.0 * s) as u8),
+                (1.0, crate::theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
+            // Cloud: three overlapping lobes plus a base.
+            let cloud = crate::theme::ACCENT;
+            painter.circle_filled(p(9.5, 10.5), 4.0 * s, cloud);
+            painter.circle_filled(p(14.8, 11.6), 5.0 * s, cloud);
+            painter.circle_filled(p(7.2, 13.4), 3.4 * s, cloud);
+            painter.rect_filled(r(6.0, 13.0, 18.0, 17.2), egui::CornerRadius::same((2.0 * s) as u8), cloud);
+            // White play triangle on the cloud core.
             painter.add(PathShape::convex_polygon(
-                vec![p(9.5, 7.0), p(17.5, 12.0), p(9.5, 17.0)],
-                ink,
+                vec![p(10.5, 11.2), p(15.5, 14.1), p(10.5, 17.0)],
+                crate::theme::TEXT_PRIMARY,
                 Stroke::NONE,
             ));
         }

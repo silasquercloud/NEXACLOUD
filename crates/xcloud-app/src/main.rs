@@ -1,4 +1,4 @@
-//! OpenXCloud application entry point.
+//! NexaCloud application entry point.
 //!
 //! * `Logging::openLogFile()` → [`init_logging`]: `tracing-subscriber` with `RUST_LOG` to
 //!   stderr and to `openxcloud.log` under the data directory. Like the Qt logger
@@ -53,7 +53,7 @@ fn default_env_filter() -> EnvFilter {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "openxcloud", version = APP_VERSION, about = "OpenXCloud: Xbox Cloud Gaming for the desktop")]
+#[command(name = "nexacloud", version = APP_VERSION, about = "NexaCloud: Xbox Cloud Gaming for the desktop")]
 struct Cli {
     /// Open a window, instantiate every screen for a few frames on detached snapshots,
     /// print `smoke: N failure(s)` and exit with 0 (none) or 1.
@@ -84,7 +84,7 @@ impl From<PresentArg> for wgpu::PresentMode {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let log_path = init_logging();
-    tracing::info!(target: LOG, "OpenXCloud {APP_VERSION} starting");
+    tracing::info!(target: LOG, "NexaCloud {APP_VERSION} starting");
     if let Some(path) = &log_path {
         tracing::info!(target: LOG, "log file {}", path.display());
     }
@@ -102,11 +102,16 @@ fn main() -> ExitCode {
     };
 
     let store = SettingsStore::open();
-    let present_mode = cli.present.map(wgpu::PresentMode::from).unwrap_or_else(|| {
+    let requested_mode = cli.present.map(wgpu::PresentMode::from).unwrap_or_else(|| {
         present_mode_from_name(&store.settings().present_mode)
-            .unwrap_or(wgpu::PresentMode::Immediate)
+            .unwrap_or(wgpu::PresentMode::Fifo)
     });
-    tracing::info!(target: LOG, "present mode {present_mode:?}");
+    // Never hand an explicit FifoRelaxed/Immediate/Mailbox to wgpu: drivers such as
+    // the Intel HD 3000 GL stack only advertise Fifo and wgpu treats an unsupported
+    // explicit mode as a fatal error. The automatic variants negotiate a supported
+    // mode (AutoNoVsync ends in Fifo), so the VSync toggle is safe everywhere.
+    let present_mode = safe_present_mode(requested_mode);
+    tracing::info!(target: LOG, "present mode {requested_mode:?} -> {present_mode:?}");
     let options = native_options(present_mode);
 
     let code = if cli.smoke {
@@ -193,6 +198,19 @@ fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static>
 
 /// `ApplicationWindow { width: 1360; height: 900; minimumWidth: 900; minimumHeight: 560 }`
 /// with the wgpu renderer and the chosen present mode.
+/// Keep the proven Fifo path on drivers that only advertise Fifo (Intel HD 3000 GL).
+/// An unsupported explicit mode crashes surface configuration, so every request that is
+/// not an automatic mode falls back to Fifo instead: VSync off is emulated by the driver.
+fn safe_present_mode(mode: wgpu::PresentMode) -> wgpu::PresentMode {
+    match mode {
+        wgpu::PresentMode::Fifo
+        | wgpu::PresentMode::FifoRelaxed
+        | wgpu::PresentMode::Immediate
+        | wgpu::PresentMode::Mailbox => wgpu::PresentMode::Fifo,
+        auto => auto,
+    }
+}
+
 fn native_options(present_mode: wgpu::PresentMode) -> eframe::NativeOptions {
     let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.device_descriptor = Arc::new(device_descriptor);
@@ -201,7 +219,7 @@ fn native_options(present_mode: wgpu::PresentMode) -> eframe::NativeOptions {
             .with_title(WINDOW_TITLE)
             .with_icon(
                 eframe::icon_data::from_png_bytes(include_bytes!(
-                    "../../../assets/icons/openxcloud-256.png"
+                    "../../../assets/icons/nexacloud-256.png"
                 ))
                 .expect("embedded app icon is a valid PNG"),
             )
@@ -250,7 +268,7 @@ fn run_smoke(options: eframe::NativeOptions) -> ExitCode {
     let outcome: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     let shared = Arc::clone(&outcome);
     let result = eframe::run_native(
-        "OpenXCloud smoke",
+        "NexaCloud smoke",
         options,
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
@@ -377,6 +395,32 @@ mod tests {
     }
 
     #[test]
+    fn explicit_present_modes_negotiate_safely() {
+        // HD 3000 GL advertises only Fifo; keep that exact mode on the proven path and
+        // fall back to it for any explicit mode the driver does not support.
+        assert_eq!(
+            safe_present_mode(wgpu::PresentMode::Immediate),
+            wgpu::PresentMode::Fifo
+        );
+        assert_eq!(
+            safe_present_mode(wgpu::PresentMode::Mailbox),
+            wgpu::PresentMode::Fifo
+        );
+        assert_eq!(
+            safe_present_mode(wgpu::PresentMode::Fifo),
+            wgpu::PresentMode::Fifo
+        );
+        assert_eq!(
+            safe_present_mode(wgpu::PresentMode::FifoRelaxed),
+            wgpu::PresentMode::Fifo
+        );
+        assert_eq!(
+            safe_present_mode(wgpu::PresentMode::AutoVsync),
+            wgpu::PresentMode::AutoVsync
+        );
+    }
+
+    #[test]
     fn native_options_follow_main_qml() {
         let options = native_options(wgpu::PresentMode::Fifo);
         assert_eq!(options.viewport.inner_size, Some(egui::vec2(1360.0, 900.0)));
@@ -384,7 +428,7 @@ mod tests {
             options.viewport.min_inner_size,
             Some(egui::vec2(900.0, 560.0))
         );
-        assert_eq!(options.viewport.title.as_deref(), Some("OpenXCloud"));
+        assert_eq!(options.viewport.title.as_deref(), Some("NexaCloud"));
         assert_eq!(
             options.wgpu_options.surface.present_mode,
             wgpu::PresentMode::Fifo

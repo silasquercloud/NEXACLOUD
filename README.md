@@ -116,7 +116,7 @@ O NexaCloud é um projeto independente da comunidade. Não possui afiliação, a
 
 <div align="center">
 
-# OpenXCloud
+# NexaCloud
 
 **Xbox Cloud Gaming, right on your desktop.**
 
@@ -126,7 +126,7 @@ A native Rust client with a game-first library, GPU upscaling, and streaming sta
 
 </div>
 
-![OpenXCloud running on macOS, showing game artwork, recently played games, recommendations, search, and favourites.](assets/screenshots/openxcloud-home.jpg)
+![NexaCloud showing game artwork, recently played games, recommendations, search, and favourites.](assets/screenshots/openxcloud-home.jpg)
 
 <p align="center"><sub>A screenshot of the running macOS app. Game artwork belongs to its respective owners.</sub></p>
 
@@ -136,8 +136,9 @@ A native Rust client with a game-first library, GPU upscaling, and streaming sta
 - **Pick up where you left off.** Recently played games live in the sidebar. Save favourites with a heart and get recommendations based on what you play.
 - **Choose your output resolution.** Upscale to **1080p, 1440p, or 4K** with AMD FSR 1.0 or optional Apple MetalFX. Adjust sharpness and change the target while playing.
 - **See what the stream is doing.** Check FPS, bitrate, network latency, and decode/GPU timings. Expand the overlay for recovery counters and 60-second performance graphs.
-- **Play with your preferred controls.** Use a supported controller with rumble, **native xCloud keyboard and mouse** (real Windows VKey/mouse reports — no virtual gamepad needed), or the keyboard's virtual-controller mapping. Native keyboard/mouse is on by default and can be switched off in the in-game menu. Touch is native on Android.
-- **An in-game menu.** Press **F1** during a stream to open the overlay: session timer, performance-stats toggle, native keyboard/mouse toggle and exit. Escape closes it. F1 is handled locally and never sent to the cloud PC.
+- **Play with your preferred controls.** Use a supported controller with rumble, **native xCloud keyboard and mouse** (real Windows VKey/mouse reports — no virtual gamepad needed), or the keyboard's virtual-controller mapping. Native keyboard/mouse is on by default and can be switched off in the in-game menu. In native mode, clicking the game surface **locks the cursor** and raw mouse motion turns the game camera like xCloud's F8 mode. Press **F8** to toggle keyboard/mouse on and off. Touch is native on Android.
+- **A lateral in-game menu.** Press **F1** during a stream to open a PS5-style control-centre rail on the right: session timer, performance-stats toggle, native keyboard/mouse toggle, upscaling toggle and exit. Escape closes it. F1 and F8 are handled locally and never sent to the cloud PC.
+- **Tune performance outside the game.** Settings → Streaming offers **30 / 60 / 120 / 240 fps** targets. Settings → Video lets you turn **VSync off** (immediate present, lowest latency) or on (fifo). The default is VSync on at 60 fps — the known-good configuration.
 - **A native streaming stack.** webrtc-rs handles transport, H.264 and Opus handle video and audio, and wgpu renders the stream. Credentials stay in the operating system's credential store and survive restarts; a temporary network failure will not sign you out.
 
 ## Get started
@@ -167,11 +168,11 @@ See the [packaging guide](PACKAGING.md) for Linux prerequisites and native packa
 
 ### Start playing
 
-1. Open OpenXCloud and sign in with Microsoft in the browser window that opens — no device code, no code to type. Your session is saved on the device and restored automatically next time.
+1. Open NexaCloud and sign in with Microsoft in the browser window that opens — no device code, no code to type. Your session is saved on the device and restored automatically next time.
 2. Pick a game from your library and press **Play**.
 3. Open **Settings → Video & upscaling** to choose the upscaler and output resolution.
 4. Enable the performance overlay with **⌘⇧I** on macOS or **Ctrl+Shift+I**. Expand **Detailed stats** for graphs and counters.
-5. During a game press **F1** for the in-game menu: session time, stats toggle, native keyboard/mouse toggle. Escape closes it.
+5. During a game press **F1** for the lateral menu: session time, stats, native input and upscale toggles. **F8** toggles keyboard/mouse mode; click the game to lock the cursor for camera control. Escape closes the menu.
 
 Local upscaling preserves the source aspect ratio and never downscales a larger source. Streaming resolution and local output resolution are separate settings.
 

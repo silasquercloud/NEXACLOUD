@@ -350,10 +350,12 @@ fn streaming(ui: &mut Ui, s: &mut AppSettings, streaming_available: bool) -> boo
             changed = true;
         }
     }
-    heading(ui, LABEL_FRAME_RATE, "");
+    heading(ui, LABEL_FRAME_RATE, "Alvo de quadros por segundo.");
     for (fps, title, subtitle) in [
-        (60, "60 fps", "Smoothest motion"),
-        (30, "30 fps", "Less bandwidth on weaker connections"),
+        (60, "60 fps", "Padrão xCloud — recomendado"),
+        (30, "30 fps", "Menos banda em conexões fracas"),
+        (120, "120 fps", "Alto desempenho (se o host negociar)"),
+        (240, "240 fps", "Máximo (se o host negociar)"),
     ] {
         if kit::radio_card(ui, s.preferred_frame_rate == fps, title, subtitle).clicked()
             && s.preferred_frame_rate != fps
@@ -456,17 +458,17 @@ fn video(ui: &mut Ui, s: &mut AppSettings) -> bool {
             });
         }
     }
-    heading(ui, LABEL_PRESENT, "How frames reach the display.");
+    heading(ui, LABEL_PRESENT, "Como os quadros chegam à tela.");
     for (value, title, subtitle) in [
         (
             "immediate",
-            "Lowest latency",
-            "Show each frame as soon as it is ready (may tear)",
+            "VSync desligado",
+            "Menor latência: mostra cada quadro assim que fica pronto (pode rasgar)",
         ),
         (
             "fifo",
-            "Vsync",
-            "Wait for the display refresh (adds up to a frame of delay)",
+            "VSync ligado",
+            "Espera a taxa da tela (adiciona até um quadro de atraso)",
         ),
     ] {
         let current = crate::settings::normalize_present_mode(&s.present_mode);
@@ -747,7 +749,7 @@ fn about(ui: &mut Ui, version: &str) {
     ui.painter().text(
         pos2(row.left() + 74.0, row.top() + 16.0),
         Align2::LEFT_CENTER,
-        "OpenXCloud",
+        "NexaCloud",
         font_w(20.0, Weight::Bold),
         theme::TEXT_PRIMARY,
     );
@@ -766,7 +768,7 @@ fn about(ui: &mut Ui, version: &str) {
     heading(
         ui,
         "Licence",
-        "GNU General Public License v3.0. OpenXCloud is not affiliated with or endorsed by Microsoft.",
+        "GNU General Public License v3.0. NexaCloud is an independent project not affiliated with or endorsed by Microsoft.",
     );
 }
 
@@ -930,7 +932,7 @@ mod tests {
                     "Output resolution",
                     LABEL_SHARPNESS,
                     LABEL_HUD,
-                    "Lowest latency",
+                    "VSync desligado",
                 ],
             ),
             (

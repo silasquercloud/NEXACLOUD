@@ -1789,12 +1789,28 @@ fn game_hero_height(width: f32) -> f32 {
 fn paint_window_backdrop(ui: &Ui, full: Rect, backdrop: Backdrop<'_>, artwork: &dyn ArtworkSource) {
     let bg = theme::BACKGROUND;
     let glow = |ui: &Ui| {
+        // OmniDash-inspired ambient wallpaper: a wide navy base plus a blue and
+        // a cyan radial bloom. Distinct from OmniDash's own artwork, entirely
+        // procedural so there is no external wallpaper to download.
+        widgets::vertical_gradient(
+            ui,
+            full,
+            Color32::from_rgb(0x05, 0x25, 0x3c),
+            bg,
+        );
         widgets::radial_glow(
             ui,
             pos2(full.center().x + full.width() * 0.08, full.top() - 60.0),
             vec2(full.width() * 0.62, 420.0),
             theme::ACCENT,
-            0.16,
+            0.22,
+        );
+        widgets::radial_glow(
+            ui,
+            pos2(full.center().x - full.width() * 0.30, full.top() + full.height() * 0.62),
+            vec2(full.width() * 0.50, full.height() * 0.55),
+            Color32::from_rgb(0x19, 0xb9, 0xdc),
+            0.10,
         );
     };
     match backdrop {

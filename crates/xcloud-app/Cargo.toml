@@ -63,12 +63,12 @@ tokio = { workspace = true, features = ["test-util"] }
 
 # `cargo bundle --release -p xcloud-app` (https://github.com/burtonageo/cargo-bundle)
 [package.metadata.bundle]
-name = "OpenXCloud"
-identifier = "de.shyim.openxcloud"
-icon = ["assets/icons/openxcloud-[0-9]*.png"]
+name = "NexaCloud"
+identifier = "com.nexacloud.app"
+icon = ["assets/icons/nexacloud-[0-9]*.png"]
 category = "public.app-category.games"
 short_description = "Xbox Cloud Gaming client"
-long_description = "OpenXCloud streams your Game Pass library with a native WebRTC transport, hardware video decode and GPU upscaling."
+long_description = "NexaCloud streams your Game Pass library with a native WebRTC transport, hardware video decode and GPU upscaling."
 
 [package.metadata.bundle.osx]
 minimum_system_version = "13.0"

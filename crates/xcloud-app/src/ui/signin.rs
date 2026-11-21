@@ -71,7 +71,7 @@ pub fn auth_layout(ui: &mut Ui, card_height: f32, card: impl FnOnce(&mut Ui)) {
         ui.painter().text(
             pos2(left + 68.0, y + 26.0),
             Align2::LEFT_CENTER,
-            "OpenXCloud",
+            "NexaCloud",
             font_w(22.0, Weight::Bold),
             theme::TEXT_PRIMARY,
         );

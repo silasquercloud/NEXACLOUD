@@ -40,6 +40,10 @@ pub fn quality_tier_profile(mode: StreamResolutionMode) -> QualityTierProfile {
         width,
         height,
         max_bitrate_kbps,
+        // Keep the advertised device capability at 60. Raising `supportsFps`
+        // changed stream negotiation and broke video on the known-good Intel
+        // GL path. The 120/240 settings are applied to the preferred frame rate
+        // only, never to this capability.
         fps: 60,
     }
 }
@@ -177,7 +181,10 @@ impl StreamingConfig {
         self.video_height_hint = profile.height;
         self.max_bitrate_kbps = profile.max_bitrate_kbps;
         self.max_video_bitrate_kbps = profile.max_bitrate_kbps;
-        self.preferred_frame_rate = self.preferred_frame_rate.clamp(1, profile.fps.max(1));
+        // Do not clamp the player's choice to the advertised capability: 120/240
+        // are exposed in Settings and must survive a resolution change. The
+        // default of 60 still drives the proven negotiation path.
+        self.preferred_frame_rate = self.preferred_frame_rate.max(1);
         self.requested_video_max_frame_rate = self.preferred_frame_rate;
         self.resolution_alias = resolution_alias(mode).to_owned();
     }
@@ -253,8 +260,8 @@ mod tests {
     #[test]
     fn with_resolution_applies_tier() {
         // Mirrors SignalingOrchestrator::installChannels: both bitrate levers
-        // take the profile value, the frame rate is clamped (not overwritten)
-        // and copied into requestedVideoMaxFrameRate.
+        // take the profile value, the frame rate choice is preserved and copied
+        // into requestedVideoMaxFrameRate.
         let config = StreamingConfig::defaults().with_resolution(StreamResolutionMode::P1080HQ);
         assert_eq!(config.max_bitrate_kbps, 30000);
         assert_eq!(config.max_video_bitrate_kbps, 30000);
@@ -273,8 +280,9 @@ mod tests {
         assert_eq!((p720.video_width_hint, p720.video_height_hint), (1280, 720));
         assert_eq!(p720.resolution_alias, "720");
 
-        // qBound(1, preferredFrameRate, profile.fps): a user setting below the
-        // tier cap survives, above it is clamped, and 0 becomes 1.
+        // The player's frame-rate choice survives a resolution change (30/120/240)
+        // and 0 becomes 1. The advertised device capability stays at 60, which is
+        // the negotiated path known to work on modest GL hardware.
         let thirty = StreamingConfig {
             preferred_frame_rate: 30,
             requested_video_max_frame_rate: 30,
@@ -289,8 +297,16 @@ mod tests {
             ..StreamingConfig::defaults()
         }
         .with_resolution(StreamResolutionMode::P1080);
-        assert_eq!(too_fast.preferred_frame_rate, 60);
-        assert_eq!(too_fast.requested_video_max_frame_rate, 60);
+        assert_eq!(too_fast.preferred_frame_rate, 120);
+        assert_eq!(too_fast.requested_video_max_frame_rate, 120);
+        let max_fps = StreamingConfig {
+            preferred_frame_rate: 240,
+            requested_video_max_frame_rate: 240,
+            ..StreamingConfig::defaults()
+        }
+        .with_resolution(StreamResolutionMode::P1080);
+        assert_eq!(max_fps.preferred_frame_rate, 240);
+        assert_eq!(max_fps.requested_video_max_frame_rate, 240);
         let zero = StreamingConfig {
             preferred_frame_rate: 0,
             ..StreamingConfig::defaults()
