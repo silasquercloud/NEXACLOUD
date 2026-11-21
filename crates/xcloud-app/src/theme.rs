@@ -1,7 +1,7 @@
 //! The OpenXCloud design system: colours, typography, metrics and the egui style.
 //!
-//! The look is a dark, graphite "console dashboard": a near-black canvas, cards one
-//! step lighter, white for selection and emphasis, and the OpenXCloud lime only where an
+//! The look is a dark violet "console dashboard": a near-black purple canvas, cards one
+//! step lighter, white for selection and emphasis, and the NexaCloud violet only where an
 //! action should pull the eye (Play, primary buttons, focus rings, the logo). Game
 //! artwork supplies the colour; the chrome stays neutral.
 //!
@@ -21,23 +21,23 @@ use egui::{Color32, CornerRadius, FontId, Shadow, Stroke, TextStyle, Visuals};
 // ----------------------------------------------------------------------------- colours
 
 /// Window canvas.
-pub const BACKGROUND: Color32 = Color32::from_rgb(0x0c, 0x0d, 0x0f);
+pub const BACKGROUND: Color32 = Color32::from_rgb(0x0d, 0x0b, 0x14);
 /// Cards, sidebar panels, inputs.
-pub const SURFACE: Color32 = Color32::from_rgb(0x17, 0x19, 0x1c);
+pub const SURFACE: Color32 = Color32::from_rgb(0x18, 0x14, 0x26);
 /// Hovered cards and controls; neutral buttons.
-pub const SURFACE_HIGH: Color32 = Color32::from_rgb(0x21, 0x24, 0x28);
+pub const SURFACE_HIGH: Color32 = Color32::from_rgb(0x24, 0x1d, 0x36);
 /// Selected navigation entries and pressed controls.
-pub const SURFACE_HIGHER: Color32 = Color32::from_rgb(0x2b, 0x2f, 0x34);
+pub const SURFACE_HIGHER: Color32 = Color32::from_rgb(0x30, 0x27, 0x46);
 /// Floating glass (over artwork): round icons, overlay pills.
-pub const SURFACE_GLASS: Color32 = Color32::from_rgba_premultiplied(0x10, 0x11, 0x13, 0xb8);
+pub const SURFACE_GLASS: Color32 = Color32::from_rgba_premultiplied(0x16, 0x11, 0x24, 0xb8);
 /// Modal sheets (settings).
-pub const SHEET: Color32 = Color32::from_rgb(0x1b, 0x1d, 0x21);
+pub const SHEET: Color32 = Color32::from_rgb(0x1d, 0x18, 0x2b);
 /// Settings category column.
-pub const SHEET_SIDE: Color32 = Color32::from_rgb(0x15, 0x17, 0x1a);
+pub const SHEET_SIDE: Color32 = Color32::from_rgb(0x16, 0x12, 0x22);
 /// Hairlines and card outlines.
-pub const BORDER: Color32 = Color32::from_rgb(0x26, 0x29, 0x2e);
-/// The OpenXCloud lime: Play, primary actions, focus.
-pub const ACCENT: Color32 = Color32::from_rgb(0xb8, 0xf0, 0x5a);
+pub const BORDER: Color32 = Color32::from_rgb(0x2d, 0x25, 0x40);
+/// The NexaCloud violet: Play, primary actions, focus.
+pub const ACCENT: Color32 = Color32::from_rgb(0xb5, 0x8c, 0xff);
 /// Primary text.
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xf4, 0xf5, 0xf7);
 /// Secondary text (publishers, captions).
@@ -50,21 +50,21 @@ pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x7a, 0x6e);
 pub const SUCCESS: Color32 = Color32::from_rgb(0x3d, 0xd6, 0x8c);
 
 /// Text on an accent fill.
-pub const ON_ACCENT: Color32 = Color32::from_rgb(0x0e, 0x14, 0x05);
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0x15, 0x0a, 0x24);
 /// Text on a white (selected) fill.
-pub const ON_WHITE: Color32 = Color32::from_rgb(0x0c, 0x0d, 0x0f);
+pub const ON_WHITE: Color32 = Color32::from_rgb(0x0d, 0x0b, 0x14);
 /// Sidebar cards.
 pub const SIDEBAR: Color32 = SURFACE;
 /// Selected sidebar entry.
 pub const SIDEBAR_SELECTED: Color32 = SURFACE_HIGHER;
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xc9, 0xf7, 0x7c);
-pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0x9c, 0xd4, 0x40);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xc8, 0xa6, 0xff);
+pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0x91, 0x62, 0xd8);
 /// Fill behind hero artwork while it loads.
-pub const HERO_FILL: Color32 = Color32::from_rgb(0x14, 0x1a, 0x14);
+pub const HERO_FILL: Color32 = Color32::from_rgb(0x1b, 0x14, 0x2c);
 /// Body copy over hero artwork.
-pub const HERO_BODY_TEXT: Color32 = Color32::from_rgb(0xd6, 0xd9, 0xde);
-/// The ambient glow at the top of the browse pages (a dark lime).
-pub const GLOW: Color32 = Color32::from_rgb(0x1d, 0x2b, 0x14);
+pub const HERO_BODY_TEXT: Color32 = Color32::from_rgb(0xdc, 0xd7, 0xe6);
+/// The ambient glow at the top of the browse pages (a dark violet).
+pub const GLOW: Color32 = Color32::from_rgb(0x2a, 0x1b, 0x45);
 /// Scrim over the window behind modal sheets.
 pub const SCRIM: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 0xb0);
 
@@ -396,8 +396,8 @@ mod tests {
 
     #[test]
     fn hex_colours_parse() {
-        assert_eq!(qml_color("#0c0d0f"), Some(BACKGROUND));
-        assert_eq!(qml_color("#b8f05a"), Some(ACCENT));
+        assert_eq!(qml_color("#0d0b14"), Some(BACKGROUND));
+        assert_eq!(qml_color("#b58cff"), Some(ACCENT));
         assert_eq!(
             qml_color("#55000000"),
             Some(Color32::from_rgba_unmultiplied(0, 0, 0, 0x55))

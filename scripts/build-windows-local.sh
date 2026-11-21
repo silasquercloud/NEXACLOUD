@@ -64,6 +64,6 @@ done
 find "$FFMPEG_ROOT/bin" -maxdepth 1 -name '*.dll' -exec cp {} dist-windows/ \;
 
 mkdir -p dist
-(cd dist-windows && zip -q -r ../dist/OpenXCloud-windows-x86_64.zip .)
-cp dist/OpenXCloud-windows-x86_64.zip "$HOME/Downloads/OpenXCloud-windows-x86_64.zip"
-echo "Pronto: ~/Downloads/OpenXCloud-windows-x86_64.zip"
+(cd dist-windows && zip -q -r ../dist/NexaCloud-windows-x86_64.zip .)
+cp dist/NexaCloud-windows-x86_64.zip "$HOME/Downloads/NexaCloud-windows-x86_64.zip"
+echo "Pronto: ~/Downloads/NexaCloud-windows-x86_64.zip"

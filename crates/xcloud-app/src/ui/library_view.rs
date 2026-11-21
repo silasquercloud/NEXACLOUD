@@ -174,7 +174,7 @@ enum Backdrop<'a> {
         height: f32,
         opacity: f32,
     },
-    /// The neutral lime glow.
+    /// The neutral violet glow.
     Glow,
 }
 
@@ -1784,7 +1784,7 @@ fn game_hero_height(width: f32) -> f32 {
 }
 
 /// Paints the window-wide backdrop: hero art fading into the canvas (the Xbox
-/// "ambient" header), or the lime glow. Drawn before the sidebar and top bar so both
+/// "ambient" header), or the violet glow. Drawn before the sidebar and top bar so both
 /// float on top of it.
 fn paint_window_backdrop(ui: &Ui, full: Rect, backdrop: Backdrop<'_>, artwork: &dyn ArtworkSource) {
     let bg = theme::BACKGROUND;

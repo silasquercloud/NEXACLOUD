@@ -860,8 +860,9 @@ pub struct StreamView {
     menu_open: bool,
     /// Wall-clock instant the current cloud session connected (for the session timer).
     session_start: Option<Instant>,
-    /// Whether native keyboard/mouse input is active (vs. the virtual gamepad fallback).
-    /// Sent to the input worker on connect; toggleable from the in-game menu.
+    /// Kept as the upstream default: the game receives virtual-controller input only.
+    /// Keyboard and mouse still drive this app's own UI/menus; they are never forwarded
+    /// to the cloud PC unless a test explicitly opts in.
     native_input: bool,
 }
 
@@ -891,14 +892,14 @@ impl StreamView {
             last_mouse: (u32::MAX, u32::MAX, u8::MAX),
             menu_open: false,
             session_start: None,
-            // Fortnite and most xCloud titles support native keyboard/mouse; enable it
-            // by default. The in-game menu can switch back to the virtual gamepad.
-            native_input: true,
+            // Same as the upstream openxcloud build: gamepad only. Keyboard/mouse are
+            // for this app's menus, not for the game.
+            native_input: false,
         }
     }
 
-    /// Overrides the keyboard/mouse input mode. Production defaults to native
-    /// (`true`); tests that exercise the virtual-controller mapping opt out.
+    /// Overrides the keyboard/mouse input mode. Production defaults to the virtual
+    /// gamepad (`false`); tests exercising native reports opt in explicitly.
     #[cfg(test)]
     pub fn with_native_input(mut self, enabled: bool) -> Self {
         self.native_input = enabled;
@@ -1069,28 +1070,26 @@ impl StreamView {
         }
     }
 
-    /// The in-game overlay menu (F1). Lets the player enable performance stats,
-    /// switch native keyboard/mouse on or off, and see the current session time.
+    /// The in-game overlay menu (F1). Gamepad-only session info and quick toggles;
+    /// keyboard/mouse remain free to drive this app's own menus.
     fn show_menu(&mut self, ui: &mut egui::Ui, area: Rect, snapshot: &StreamSnapshot, ctx: &egui::Context) {
-        // Keep the timer ticking while the menu is open.
+        // Keep the session timer ticking while the menu is open.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        let width: f32 = 320.0;
-        let height: f32 = 236.0;
-        let center = area.center();
-        let rect = Rect::from_center_size(
-            center,
-            vec2(width.min(area.width() - 24.0), height.min(area.height() - 24.0)),
-        );
+        let width = 360.0_f32.min(area.width() - 24.0);
+        let height = 344.0_f32.min(area.height() - 24.0);
+        let rect = Rect::from_center_size(area.center(), vec2(width, height));
 
-        // Dim the game behind the menu and draw the panel.
-        ui.painter().rect_filled(area, 0.0, Color32::from_black_alpha(150));
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(12), Color32::from_rgba_premultiplied(18, 20, 26, 245));
+        ui.painter().rect_filled(area, 0.0, Color32::from_black_alpha(165));
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(16),
+            Color32::from_rgba_premultiplied(22, 16, 36, 248),
+        );
         ui.painter().rect_stroke(
             rect,
-            CornerRadius::same(12),
-            (1.5, Color32::from_rgb(70, 130, 180)),
+            CornerRadius::same(16),
+            (1.5, theme::ACCENT),
             egui::StrokeKind::Inside,
         );
 
@@ -1100,73 +1099,145 @@ impl StreamView {
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         child.add_space(14.0);
-        child.horizontal(|h| {
-            h.add_space(16.0);
-            h.label(egui::RichText::new("xCloud Menu").size(20.0).strong().color(Color32::WHITE));
-            h.add_space(8.0);
-            h.label(egui::RichText::new("F1").size(12.0).color(Color32::from_gray(150)));
-        });
-        child.add_space(6.0);
-        child.separator();
-        child.add_space(6.0);
 
-        // Session timer.
-        let elapsed = self
-            .session_start
-            .map(|s| s.elapsed())
-            .unwrap_or_default();
-        let secs = elapsed.as_secs();
-        let timer = format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60);
+        // Header.
         child.horizontal(|h| {
-            h.add_space(16.0);
-            h.label(egui::RichText::new("Session time").size(13.0).color(Color32::from_gray(170)));
+            h.add_space(18.0);
+            h.label(
+                egui::RichText::new("NexaCloud")
+                    .size(20.0)
+                    .strong()
+                    .color(theme::TEXT_PRIMARY),
+            );
             h.add_space(8.0);
-            h.label(egui::RichText::new(&timer).size(15.0).strong().color(Color32::from_rgb(120, 200, 255)));
+            h.label(
+                egui::RichText::new("MENU")
+                    .size(10.0)
+                    .strong()
+                    .color(theme::ON_ACCENT)
+                    .background_color(theme::ACCENT),
+            );
+            h.add_space(8.0);
+            h.label(egui::RichText::new("F1").size(12.0).color(theme::TEXT_TERTIARY));
         });
         child.add_space(4.0);
         child.horizontal(|h| {
-            h.add_space(16.0);
+            h.add_space(18.0);
+            h.label(
+                egui::RichText::new(&snapshot.title_name)
+                    .size(12.0)
+                    .color(theme::TEXT_SECONDARY),
+            );
+        });
+        child.add_space(10.0);
+        child.separator();
+        child.add_space(10.0);
+
+        // Session card: big timer + negotiated stream details.
+        let elapsed = self.session_start.map(|s| s.elapsed()).unwrap_or_default();
+        let secs = elapsed.as_secs();
+        let timer = format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60);
+        child.horizontal(|h| {
+            h.add_space(18.0);
+            h.label(egui::RichText::new("TEMPO DE SESSÃO").size(10.0).strong().color(theme::TEXT_TERTIARY));
+            h.add_space(10.0);
+            h.label(egui::RichText::new(&timer).size(22.0).strong().color(theme::ACCENT));
+        });
+        child.add_space(4.0);
+        child.horizontal(|h| {
+            h.add_space(18.0);
             h.label(
                 egui::RichText::new(format!(
-                    "{} · {:.0} fps",
-                    snapshot.title_name, snapshot.stats.frames_per_second
+                    "{}×{}  ·  {:.0} fps  ·  {:.1} Mbps",
+                    snapshot.stats.negotiated_width,
+                    snapshot.stats.negotiated_height,
+                    snapshot.stats.frames_per_second,
+                    snapshot.bitrate_mbps(),
                 ))
                 .size(11.0)
-                .color(Color32::from_gray(130)),
+                .color(theme::TEXT_SECONDARY),
             );
         });
         child.add_space(10.0);
         child.separator();
         child.add_space(8.0);
 
-        // Stats toggle ("estatísticas").
+        // Quick toggles. These do not touch the proven stream negotiation defaults.
         child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button(if snapshot.hud_enabled { "Estatísticas: ON" } else { "Estatísticas: OFF" }).clicked() {
-                self.stream.send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
+            h.add_space(18.0);
+            if h
+                .button(egui::RichText::new(if snapshot.hud_enabled {
+                    "Estatísticas  ON"
+                } else {
+                    "Estatísticas  OFF"
+                }))
+                .clicked()
+            {
+                self.stream
+                    .send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
+            }
+            h.add_space(8.0);
+            let upscale = self.settings.read().upscale_enabled;
+            if h
+                .button(egui::RichText::new(if upscale { "Upscale  ON" } else { "Upscale  OFF" }))
+                .clicked()
+            {
+                {
+                    let mut settings = self.settings.write();
+                    settings.upscale_enabled = !upscale;
+                }
+                let settings = self.settings.read().clone();
+                self.stream.send(StreamCommand::ApplySettings(settings));
             }
         });
+        child.add_space(10.0);
+        child.separator();
         child.add_space(8.0);
 
-        // Native keyboard/mouse toggle.
+        // Input status: the cloud PC gets gamepad reports only.
         child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button(if self.native_input { "Teclado/mouse nativo: ON" } else { "Teclado/mouse nativo: OFF" }).clicked() {
-                self.native_input = !self.native_input;
-                self.stream.send(StreamCommand::SetNativeInputEnabled(self.native_input));
-            }
+            h.add_space(18.0);
+            h.label(
+                egui::RichText::new("ENTRADA").size(10.0).strong().color(theme::TEXT_TERTIARY),
+            );
         });
-        child.add_space(8.0);
-
-        // Stop stream / close menu.
+        child.add_space(2.0);
         child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button("Sair da sessão").clicked() {
+            h.add_space(18.0);
+            let controller = if snapshot.controller_connected && !snapshot.controller_name.is_empty() {
+                snapshot.controller_name.clone()
+            } else {
+                "Controle virtual".to_owned()
+            };
+            h.label(
+                egui::RichText::new(format!("Controle  ·  {controller}"))
+                    .size(12.0)
+                    .color(theme::TEXT_PRIMARY),
+            );
+        });
+        child.add_space(2.0);
+        child.horizontal(|h| {
+            h.add_space(18.0);
+            h.label(
+                egui::RichText::new("Teclado e mouse controlam apenas este app.")
+                    .size(10.0)
+                    .color(theme::TEXT_TERTIARY),
+            );
+        });
+        child.add_space(10.0);
+
+        // Footer actions.
+        child.horizontal(|h| {
+            h.add_space(18.0);
+            if h
+                .button(egui::RichText::new("Sair da sessão").color(theme::DANGER))
+                .clicked()
+            {
                 self.stream.send(StreamCommand::StopStreaming);
                 self.menu_open = false;
             }
             h.add_space(8.0);
-            if h.button("Fechar menu").clicked() {
+            if h.button("Fechar (Esc)").clicked() {
                 self.menu_open = false;
             }
         });
@@ -1987,12 +2058,12 @@ mod tests {
 
     #[test]
     fn native_keyboard_sends_windows_vkey_reports() {
-        // Production default: native keyboard/mouse is enabled.
+        // The production build is gamepad-only; this test opts into native reports.
         let (handle, _snapshot, rx) = Handle::new(connected());
         let (_writer, reader) = FrameMailbox::open();
         let video: VideoSource = Arc::new(parking_lot::Mutex::new(reader));
         let settings = Arc::new(RwLock::new(AppSettings::default()));
-        let mut view = StreamView::new(handle, video, settings);
+        let mut view = StreamView::new(handle, video, settings).with_native_input(true);
         let mut h = harness(&mut view);
         h.run();
         drain(&rx);
@@ -2011,6 +2082,48 @@ mod tests {
                     pressed: false
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn production_default_sends_only_gamepad_reports() {
+        let Fixture { mut view, rx, .. } = fixture(connected());
+        let mut h = harness(&mut view);
+        h.run();
+        drain(&rx);
+
+        h.key_press(Key::Space);
+        h.step();
+        let commands = drain(&rx);
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                StreamCommand::SetKey { name, pressed: true } if name == "a"
+            )),
+            "{commands:?}"
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|command| matches!(command, StreamCommand::NativeKey { .. })),
+            "the game must never receive native keyboard reports"
+        );
+    }
+
+    #[test]
+    fn f1_menu_shows_gamepad_only_input_status() {
+        let Fixture { mut view, rx, .. } = fixture(connected());
+        let mut h = harness(&mut view);
+        h.run();
+        drain(&rx);
+
+        h.key_press(Key::F1);
+        h.step();
+        let _ = h.get_by_label("Teclado e mouse controlam apenas este app.");
+        assert!(
+            !drain(&rx)
+                .iter()
+                .any(|command| matches!(command, StreamCommand::SetNativeInputEnabled(_)))
         );
     }
 

@@ -9,9 +9,12 @@
 //! failures map to `Error::TokenStore`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
+use directories::ProjectDirs;
 
 use crate::{Error, Result};
 
@@ -174,6 +177,210 @@ impl CredentialBackend for OsCredentials {
     }
 }
 
+/// Local fallback used when the OS credential store is unavailable or rejects a
+/// write. On Windows the Credential Manager limits a credential blob to a few
+/// kilobytes, so a full `credentials_v1` bundle (MSA + refresh + LPT + stream
+/// tokens) can be too large and `CredWrite` fails with an access-denied style
+/// error. Signing in must not fail because of that, so the bundle is written to
+/// a per-user JSON file instead. The file lives beside the app settings and is
+/// never used when the OS store works.
+struct FileCredentials {
+    path: PathBuf,
+}
+
+const FALLBACK_MARKER: &str = "__backend";
+const FALLBACK_VALUE: &str = "fallback";
+
+impl FileCredentials {
+    fn new(service: &str) -> Option<Self> {
+        let dirs = ProjectDirs::from("de", "shyim", "openxcloud")?;
+        let safe_service: String = service
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        Some(Self {
+            path: dirs.config_dir().join(format!("credentials_{safe_service}.json")),
+        })
+    }
+
+    fn read_map(&self) -> Result<Credentials> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(raw) if raw.trim().is_empty() => Ok(Credentials::new()),
+            Ok(raw) => serde_json::from_str(&raw)
+                .map_err(|_| Error::TokenStore("invalid local credential fallback".into())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Credentials::new()),
+            Err(error) => Err(Error::TokenStore(format!(
+                "read local credential fallback: {error}"
+            ))),
+        }
+    }
+
+    fn write_map(&self, values: &Credentials) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::TokenStore(format!("create fallback dir: {e}")))?;
+        }
+        let raw = serde_json::to_string(values)?;
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, raw.as_bytes())
+            .map_err(|e| Error::TokenStore(format!("write local credential fallback: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        // Windows cannot rename over an existing file, so remove the old one first.
+        if std::fs::rename(&tmp, &self.path).is_err() {
+            let _ = std::fs::remove_file(&self.path);
+            std::fs::rename(&tmp, &self.path)
+                .map_err(|e| Error::TokenStore(format!("replace local credential fallback: {e}")))?;
+        }
+        Ok(())
+    }
+}
+
+impl CredentialBackend for FileCredentials {
+    fn read(&self, key: &str) -> Result<String> {
+        Ok(self.read_map()?.get(key).cloned().unwrap_or_default())
+    }
+
+    fn write(&self, key: &str, value: &str) -> Result<()> {
+        let mut values = self.read_map()?;
+        values.insert(key.to_owned(), value.to_owned());
+        self.write_map(&values)
+    }
+
+    fn remove(&self, key: &str) -> Result<()> {
+        let mut values = self.read_map()?;
+        values.remove(key);
+        self.write_map(&values)
+    }
+}
+
+/// Tries the OS credential store first and silently falls back to the per-user
+/// JSON file whenever it fails. A marker inside the fallback bundle lets a fresh
+/// process prefer it over an older bundle that may still be stuck in the OS
+/// store after a failed write.
+struct ResilientCredentials {
+    primary: Arc<dyn CredentialBackend>,
+    fallback: Arc<dyn CredentialBackend>,
+    warned: AtomicBool,
+}
+
+impl ResilientCredentials {
+    fn new(primary: Arc<dyn CredentialBackend>, fallback: Arc<dyn CredentialBackend>) -> Self {
+        Self {
+            primary,
+            fallback,
+            warned: AtomicBool::new(false),
+        }
+    }
+
+    fn warn_once(&self, reason: &str) {
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(target: "Auth", "OS credential store unavailable ({reason}); using the local credential fallback");
+        }
+    }
+
+    fn mark(value: &str) -> String {
+        let mut parsed: serde_json::Value = match serde_json::from_str(value) {
+            Ok(value) => value,
+            Err(_) => return value.to_owned(),
+        };
+        if let Some(object) = parsed.as_object_mut() {
+            object.insert(FALLBACK_MARKER.into(), serde_json::json!(FALLBACK_VALUE));
+            serde_json::to_string(&object).unwrap_or_else(|_| value.to_owned())
+        } else {
+            value.to_owned()
+        }
+    }
+
+    fn unmark(value: &str) -> String {
+        let mut parsed: serde_json::Value = match serde_json::from_str(value) {
+            Ok(value) => value,
+            Err(_) => return value.to_owned(),
+        };
+        if let Some(object) = parsed.as_object_mut() {
+            object.remove(FALLBACK_MARKER);
+            serde_json::to_string(&object).unwrap_or_else(|_| value.to_owned())
+        } else {
+            value.to_owned()
+        }
+    }
+
+    fn is_marked(value: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(value)
+            .ok()
+            .and_then(|value| value.get(FALLBACK_MARKER).cloned())
+            .and_then(|marker| marker.as_str().map(str::to_owned))
+            .as_deref()
+            == Some(FALLBACK_VALUE)
+    }
+}
+
+impl CredentialBackend for ResilientCredentials {
+    fn read(&self, key: &str) -> Result<String> {
+        let primary = self.primary.read(key);
+        let fallback = self.fallback.read(key);
+        let primary_value = primary.as_ref().ok().cloned().unwrap_or_default();
+        let fallback_value = fallback.as_ref().ok().cloned().unwrap_or_default();
+
+        // The fallback copy is newer when it carries the marker, or when the OS
+        // store has no copy at all.
+        if !fallback_value.is_empty() && (primary_value.is_empty() || Self::is_marked(&fallback_value)) {
+            if primary.is_err() {
+                self.warn_once("read failed");
+            }
+            return Ok(fallback_value);
+        }
+        match (&primary, &fallback) {
+            (Ok(value), _) => Ok(value.clone()),
+            (Err(_), Ok(value)) => Ok(value.clone()),
+            (Err(error), Err(_)) => Err(Error::TokenStore(error.to_string())),
+        }
+    }
+
+    fn write(&self, key: &str, value: &str) -> Result<()> {
+        match self.primary.write(key, &Self::unmark(value)) {
+            Ok(()) => {
+                // A previously broken OS store may have recovered: do not let a
+                // stale fallback copy win on the next start.
+                let _ = self.fallback.remove(key);
+                Ok(())
+            }
+            Err(error) => {
+                self.warn_once(&format!("write failed: {error}"));
+                self.fallback
+                    .write(key, &Self::mark(value))
+                    .map_err(|fallback_error| {
+                        Error::TokenStore(format!(
+                            "{error}; local credential fallback also failed: {fallback_error}"
+                        ))
+                    })
+            }
+        }
+    }
+
+    fn remove(&self, key: &str) -> Result<()> {
+        let primary = self.primary.remove(key);
+        let fallback = self.fallback.remove(key);
+        match (primary, fallback) {
+            (Ok(()), _) => Ok(()),
+            (Err(error), Ok(())) => {
+                self.warn_once(&format!("delete failed: {error}"));
+                Ok(())
+            }
+            (Err(error), Err(_)) => Err(error),
+        }
+    }
+}
+
 /// One Keychain item for all credentials, loaded once per store and shared by clones.
 /// An absent bundle is a fresh, signed-out session.
 #[derive(Clone)]
@@ -203,11 +410,16 @@ impl KeyringTokenStore {
     }
 
     pub fn with_service(service: &str) -> Self {
+        let primary: Arc<dyn CredentialBackend> = Arc::new(OsCredentials {
+            service: service.to_owned(),
+        });
+        let backend: Arc<dyn CredentialBackend> = match FileCredentials::new(service) {
+            Some(fallback) => Arc::new(ResilientCredentials::new(primary, Arc::new(fallback))),
+            None => primary,
+        };
         Self {
             service: service.to_owned(),
-            backend: Arc::new(OsCredentials {
-                service: service.to_owned(),
-            }),
+            backend,
             cache: Arc::new(Mutex::new(None)),
         }
     }
@@ -434,6 +646,53 @@ mod tests {
         assert!(store.save_refresh_token("R2").is_err());
         assert_eq!(store.load_refresh_token().unwrap(), "R1");
         assert_eq!(backend.values.lock().unwrap()[KEY_BUNDLE], previous);
+    }
+
+    fn resilient_store(primary: Arc<FakeCredentials>, fallback: Arc<FakeCredentials>) -> KeyringTokenStore {
+        KeyringTokenStore {
+            service: "test".into(),
+            backend: Arc::new(ResilientCredentials::new(primary, fallback)),
+            cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn sign_in_succeeds_when_the_os_store_rejects_the_bundle() {
+        use std::sync::atomic::Ordering;
+        let primary = Arc::new(FakeCredentials::default());
+        let fallback = Arc::new(FakeCredentials::default());
+        primary.fail_write.store(true, Ordering::Relaxed);
+
+        let store = resilient_store(primary.clone(), fallback.clone());
+        store.save_refresh_token("R1").unwrap();
+        store.save_stream_tokens(&sample_tokens()).unwrap();
+        assert_eq!(store.load_refresh_token().unwrap(), "R1");
+        assert_eq!(store.load_stream_tokens().unwrap(), sample_tokens());
+
+        // A fresh process must recover the bundle from the fallback, even if an
+        // older copy is still stuck in the OS store.
+        primary.fail_write.store(false, Ordering::Relaxed);
+        let restarted = resilient_store(primary.clone(), fallback.clone());
+        assert_eq!(restarted.load_refresh_token().unwrap(), "R1");
+        assert_eq!(restarted.load_stream_tokens().unwrap(), sample_tokens());
+        assert!(fallback.values.lock().unwrap().contains_key(KEY_BUNDLE));
+    }
+
+    #[test]
+    fn recovered_os_store_takes_over_and_clears_the_fallback() {
+        let primary = Arc::new(FakeCredentials::default());
+        let fallback = Arc::new(FakeCredentials::default());
+        fallback
+            .write(KEY_BUNDLE, r#"{"refresh_token":"STALE","__backend":"fallback"}"#)
+            .unwrap();
+
+        let store = resilient_store(primary.clone(), fallback.clone());
+        // The marker says the fallback copy is the newest one, so it is restored.
+        assert_eq!(store.load_refresh_token().unwrap(), "STALE");
+        store.save_refresh_token("FRESH").unwrap();
+
+        assert_eq!(store.load_refresh_token().unwrap(), "FRESH");
+        assert!(!fallback.values.lock().unwrap().contains_key(KEY_BUNDLE));
     }
 
     #[test]
