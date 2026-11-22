@@ -174,7 +174,7 @@ enum Backdrop<'a> {
         height: f32,
         opacity: f32,
     },
-    /// The neutral lime glow.
+    /// The neutral violet glow.
     Glow,
 }
 
@@ -605,7 +605,6 @@ impl LibraryView {
     ) -> Option<Nav> {
         let mut nav = None;
         let cy = rect.center().y;
-        let gamertag = session.read().gamertag.clone();
         // Left: logo + sidebar toggle.
         icons::paint(
             ui.painter(),
@@ -668,31 +667,13 @@ impl LibraryView {
         {
             nav = Some(Nav::Settings);
         }
-        let account_response = kit::place(ui, account, |ui| avatar_button(ui, 34.0, &gamertag));
+        let account_response = kit::place(ui, account, |ui| avatar_button(ui, 34.0));
         egui::Popup::menu(&account_response)
             .align(egui::RectAlign::BOTTOM_END)
             .gap(8.0)
             .width(220.0)
             .show(|ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
-                if !gamertag.is_empty() {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        ui.label(RichText::new(&gamertag).font(theme::font_w(15.0, theme::Weight::Semibold)));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        ui.label(
-                            RichText::new("Signed in with Microsoft")
-                                .font(theme::font(11.0))
-                                .color(theme::SUCCESS),
-                        );
-                    });
-                    ui.add_space(8.0);
-                    widgets::hairline(ui);
-                    ui.add_space(4.0);
-                }
                 if menu_item(ui, Icon::Refresh, "Refresh library").clicked() {
                     library.send(LibraryCommand::Refresh { force: true });
                     ui.close();
@@ -1784,7 +1765,7 @@ fn game_hero_height(width: f32) -> f32 {
 }
 
 /// Paints the window-wide backdrop: hero art fading into the canvas (the Xbox
-/// "ambient" header), or the lime glow. Drawn before the sidebar and top bar so both
+/// "ambient" header), or the violet glow. Drawn before the sidebar and top bar so both
 /// float on top of it.
 fn paint_window_backdrop(ui: &Ui, full: Rect, backdrop: Backdrop<'_>, artwork: &dyn ArtworkSource) {
     let bg = theme::BACKGROUND;
@@ -2192,7 +2173,7 @@ fn detail_rows(card: &LibraryCard) -> Vec<(&'static str, String)> {
 
 // ----------------------------------------------------------------------------- small widgets
 
-fn avatar_button(ui: &mut Ui, size: f32, gamertag: &str) -> egui::Response {
+fn avatar_button(ui: &mut Ui, size: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, ACCOUNT_LABEL));
     if response.hovered() {
@@ -2208,35 +2189,17 @@ fn avatar_button(ui: &mut Ui, size: f32, gamertag: &str) -> egui::Response {
             t,
         ),
     );
-    if gamertag.is_empty() {
-        icons::paint(
-            ui.painter(),
-            rect.shrink(size * 0.22),
-            Icon::Person,
-            theme::TEXT_PRIMARY,
-        );
-    } else {
-        // Show the gamertag's first letter as the account avatar.
-        let initial = gamertag.chars().next().unwrap().to_uppercase().to_string();
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            initial,
-            theme::font_w(size * 0.42, theme::Weight::Bold),
-            theme::ACCENT,
-        );
-    }
-    // Green "signed in" dot.
+    icons::paint(
+        ui.painter(),
+        rect.shrink(size * 0.22),
+        Icon::Person,
+        theme::TEXT_PRIMARY,
+    );
     ui.painter()
         .circle_filled(rect.right_bottom() - vec2(5.0, 5.0), 5.0, theme::BACKGROUND);
     ui.painter()
         .circle_filled(rect.right_bottom() - vec2(5.0, 5.0), 3.5, theme::SUCCESS);
-    let label = if gamertag.is_empty() {
-        ACCOUNT_LABEL.to_owned()
-    } else {
-        format!("{ACCOUNT_LABEL}: {gamertag}")
-    };
-    response.on_hover_text(label)
+    response.on_hover_text(ACCOUNT_LABEL)
 }
 
 fn menu_item(ui: &mut Ui, icon: Icon, text: &str) -> egui::Response {

@@ -9,7 +9,6 @@
 //! error, sign-out) opens the browser again through the view's opener
 //! (`open::that_detached` on a helper thread by default, a recording closure in tests).
 
-use std::process::Command;
 use std::sync::Arc;
 
 use egui::{Rect, RichText, Ui, pos2, vec2};
@@ -22,30 +21,17 @@ use crate::ui::kit::{Button, Tone};
 /// Opens a URL in the system browser (`Qt.openUrlExternally`).
 pub type UrlOpener = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Opens the sign-in page in Chromium. The auth service reads the redirect URL
-/// from Chromium's history, so using a fixed browser keeps the detection reliable
-/// even when another browser is the system default. Runs on a helper thread so the
-/// egui frame never waits on the browser launcher.
+/// `Qt.openUrlExternally` is asynchronous; `open::that` would spawn the platform
+/// launcher and wait for it inside the egui frame. Hand the URL off to a short-lived
+/// thread and use the detached variant so the UI thread never waits on it.
 fn system_opener() -> UrlOpener {
     Arc::new(|url: &str| {
         let url = url.to_owned();
         let spawned = std::thread::Builder::new()
             .name("open-sign-in-page".into())
             .spawn(move || {
-                let chromium = Command::new("chromium")
-                    .arg("--new-window")
-                    .arg(&url)
-                    .spawn();
-                match chromium {
-                    Ok(mut child) => {
-                        let _ = child.wait();
-                    }
-                    Err(error) => {
-                        tracing::warn!(target: "Auth", "chromium failed ({error}); trying default browser");
-                        if let Err(error) = open::that_detached(&url) {
-                            tracing::warn!(target: "Auth", "could not open sign-in page {url}: {error}");
-                        }
-                    }
+                if let Err(err) = open::that_detached(&url) {
+                    tracing::warn!(target: "Auth", "could not open sign-in page {url}: {err}");
                 }
             });
         if let Err(err) = spawned {
@@ -151,28 +137,18 @@ impl DeviceCodeView {
 
         crate::ui::signin::auth_layout(ui, 418.0, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-            ui.label(RichText::new("Sign in with Microsoft").font(font_w(28.0, Weight::Bold)));
+            ui.label(RichText::new("Sign in on the web").font(font_w(28.0, Weight::Bold)));
             ui.add_space(10.0);
             ui.label(
                 RichText::new(
-                    "A browser window will open. Sign in with your Microsoft account there — the app detects the redirect automatically. No code to type.",
+                    "Go to microsoft.com/link and enter this code. It may already be filled in.",
                 )
                 .font(theme::font(15.0))
                 .color(theme::TEXT_SECONDARY),
             );
             ui.add_space(24.0);
-            ui.label(
-                RichText::new("If the browser did not open, use the button below or open this link:")
-                    .font(theme::font(13.0))
-                    .color(theme::TEXT_TERTIARY),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(sign_in_url(&snapshot))
-                    .font(theme::font(11.0))
-                    .color(theme::TEXT_SECONDARY),
-            );
-            ui.add_space(18.0);
+            code_box(ui, &snapshot.user_code);
+            ui.add_space(22.0);
             let open_page = Button::new("Open Microsoft sign-in")
                 .icon(Icon::External)
                 .primary()
@@ -184,15 +160,28 @@ impl DeviceCodeView {
                 self.open_sign_in_page(&snapshot);
             }
             ui.add_space(10.0);
-            if Button::new("Cancel")
-                .tone(Tone::Ghost)
-                .height(44.0)
-                .min_width(ui.available_width())
-                .show(ui)
-                .clicked()
-            {
-                session.send(SessionCommand::CancelSignIn);
-            }
+            let half = (ui.available_width() - 10.0) / 2.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
+                if Button::new("Copy code")
+                    .icon(Icon::Copy)
+                    .height(44.0)
+                    .min_width(half)
+                    .show(ui)
+                    .clicked()
+                {
+                    ui.ctx().copy_text(snapshot.user_code.clone());
+                }
+                if Button::new("Cancel")
+                    .tone(Tone::Ghost)
+                    .height(44.0)
+                    .min_width(half)
+                    .show(ui)
+                    .clicked()
+                {
+                    session.send(SessionCommand::CancelSignIn);
+                }
+            });
             ui.add_space(22.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
@@ -207,8 +196,7 @@ impl DeviceCodeView {
     }
 }
 
-/// The user code as large letter tiles, split at the dash (kept for reference).
-#[allow(dead_code)]
+/// The user code as large letter tiles, split at the dash.
 fn code_box(ui: &mut Ui, user_code: &str) {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, 72.0), egui::Sense::hover());
@@ -392,7 +380,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "legacy device-code flow; sign-in is now interactive authorization-code + PKCE"]
     fn copy_code_copies_user_code() {
         let (session, _s, _rx) = Handle::new(snapshot());
         let (opener, _opened) = recording_opener();

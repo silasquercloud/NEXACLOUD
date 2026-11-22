@@ -10,9 +10,9 @@ use egui::{
 };
 
 use crate::settings::{
-    LABEL_DEADZONE, LABEL_FRAME_RATE, LABEL_INVERT_Y, LABEL_IPV6, LABEL_PRESENT, LABEL_REGION,
-    LABEL_RESOLUTION, LABEL_SHARPNESS, LABEL_SWAP_AB, LABEL_TRIGGER, LABEL_UPSCALE,
-    LABEL_UPSCALER_KIND, LABEL_VIBRATION,
+    LABEL_DEADZONE, LABEL_FRAME_RATE, LABEL_HARDWARE_DECODE, LABEL_INVERT_Y, LABEL_IPV6,
+    LABEL_LICENSED_ONLY, LABEL_PRESENT, LABEL_REGION, LABEL_RESOLUTION, LABEL_SHARPNESS,
+    LABEL_SWAP_AB, LABEL_TRIGGER, LABEL_UPSCALE, LABEL_UPSCALER_KIND, LABEL_VIBRATION,
 };
 use crate::state::AppSettings;
 use crate::theme::{self, Weight, font_w};
@@ -291,7 +291,7 @@ impl SettingsSheet {
                         Category::Language => {
                             out.changed |= language(ui, settings, &mut self.language_filter)
                         }
-                        Category::Account => account(ui, out),
+                        Category::Account => out.changed |= account(ui, settings, out),
                         Category::About => about(ui, app_version),
                     }
                     ui.add_space(24.0);
@@ -352,6 +352,8 @@ fn streaming(ui: &mut Ui, s: &mut AppSettings, streaming_available: bool) -> boo
     }
     heading(ui, LABEL_FRAME_RATE, "");
     for (fps, title, subtitle) in [
+        (240, "240 fps", "Experimental high refresh (se suportado)"),
+        (120, "120 fps", "Very smooth motion (se suportado)"),
         (60, "60 fps", "Smoothest motion"),
         (30, "30 fps", "Less bandwidth on weaker connections"),
     ] {
@@ -362,6 +364,21 @@ fn streaming(ui: &mut Ui, s: &mut AppSettings, streaming_available: bool) -> boo
             changed = true;
         }
     }
+    heading(ui, "VSync", "");
+    let vsync_off = crate::settings::normalize_present_mode(&s.present_mode) == "off";
+    changed |= kit::setting_row(
+        ui,
+        "VSync desligado",
+        "Reduz latencia; pode causar tearing. Usa Mailbox quando disponivel.",
+        |ui| {
+            let mut off = vsync_off;
+            let resp = kit::toggle(ui, &mut off, "VSync desligado").changed();
+            if resp {
+                s.present_mode = if off { "off".into() } else { "immediate".into() };
+            }
+            resp
+        },
+    );
     heading(ui, "Network", "");
     changed |= kit::setting_row(
         ui,
@@ -430,7 +447,7 @@ fn video(ui: &mut Ui, s: &mut AppSettings) -> bool {
         );
         caption(ui, LABEL_UPSCALER_KIND);
         let current = crate::settings::normalize_upscaler(&s.upscaler);
-        for (value, title, subtitle) in [
+        let cards = [
             (
                 "fsr",
                 "FSR 1.0",
@@ -441,7 +458,19 @@ fn video(ui: &mut Ui, s: &mut AppSettings) -> bool {
                 "MetalFX",
                 "Apple's spatial scaler (falls back to FSR when unavailable)",
             ),
-        ] {
+            (
+                "vsr",
+                "Video Super Resolution",
+                "NVIDIA RTX / Intel driver AI upscaling; turn on RTX Video Super resolution in the NVIDIA app (falls back to FSR when off)",
+            ),
+        ];
+        // VSR only exists on Windows; elsewhere the panel keeps its two cards.
+        let shown = if cfg!(windows) {
+            &cards[..]
+        } else {
+            &cards[..2]
+        };
+        for &(value, title, subtitle) in shown {
             if kit::radio_card(ui, current == value, title, subtitle).clicked() && current != value
             {
                 s.upscaler = value.to_owned();
@@ -468,6 +497,11 @@ fn video(ui: &mut Ui, s: &mut AppSettings) -> bool {
             "Vsync",
             "Wait for the display refresh (adds up to a frame of delay)",
         ),
+        (
+            "off",
+            "VSync desligado",
+            "Sem vsync (usa Mailbox quando suportado) para menor latencia",
+        ),
     ] {
         let current = crate::settings::normalize_present_mode(&s.present_mode);
         if kit::radio_card(ui, current == value, title, subtitle).clicked() && current != value {
@@ -475,18 +509,51 @@ fn video(ui: &mut Ui, s: &mut AppSettings) -> bool {
             changed = true;
         }
     }
-    heading(ui, "Overlay", "");
+    if cfg!(target_os = "linux") {
+        heading(ui, "Decoding", "");
+        changed |= kit::setting_row(
+            ui,
+            LABEL_HARDWARE_DECODE,
+            "Decode the stream on the GPU with VAAPI. Applies after restarting NexaCloud",
+            |ui| kit::toggle(ui, &mut s.hardware_decode, LABEL_HARDWARE_DECODE).changed(),
+        );
+    }
+    heading(ui, "Overlay / imagem", "");
     changed |= kit::setting_row(
         ui,
         LABEL_HUD,
         "Resolution, frame rate, bitrate and latency while streaming",
         |ui| kit::toggle(ui, &mut s.hud_enabled, LABEL_HUD).changed(),
     );
+    changed |= kit::setting_row(
+        ui,
+        "Mostrar estatisticas",
+        "Mostra overlay de estatisticas/performance durante o stream",
+        |ui| kit::toggle(ui, &mut s.show_stats, "Mostrar estatisticas").changed(),
+    );
+    changed |= kit::setting_row(
+        ui,
+        "Esticar imagem",
+        "Preenche a tela ignorando proporcao (stretch)",
+        |ui| kit::toggle(ui, &mut s.stretch_video, "Esticar imagem").changed(),
+    );
+    if kit::setting_row(ui, "Zoom da imagem", "Ajusta o zoom/proporcao dentro do jogo", |ui| {
+        slider(ui, &mut s.video_zoom, 0.5..=3.0, "Zoom da imagem", |v| format!("{v:.2}x"))
+    }) {
+        changed = true;
+    }
     changed
 }
 
 fn controller(ui: &mut Ui, s: &mut AppSettings) -> bool {
     let mut changed = false;
+    heading(ui, "Keyboard and mouse", "");
+    changed |= kit::setting_row(
+        ui,
+        "Native MKB",
+        "Send real keyboard and mouse input to supported games. Click the stream to lock the pointer, Esc to release",
+        |ui| kit::toggle(ui, &mut s.native_mkb, "Native MKB").changed(),
+    );
     heading(ui, "Buttons", "");
     changed |= kit::setting_row(ui, LABEL_SWAP_AB, "Swap the A and B buttons", |ui| {
         kit::toggle(ui, &mut s.swap_ab, LABEL_SWAP_AB).changed()
@@ -708,11 +775,17 @@ fn locale_row(
     response
 }
 
-fn account(ui: &mut Ui, out: &mut SheetOutput) {
+fn account(ui: &mut Ui, s: &mut AppSettings, out: &mut SheetOutput) -> bool {
     heading(
         ui,
         "Your library",
         "Reload the Game Pass catalog and your recently played games.",
+    );
+    let changed = kit::setting_row(
+        ui,
+        LABEL_LICENSED_ONLY,
+        "Hide games that neither your subscription nor your purchases let you play",
+        |ui| kit::toggle(ui, &mut s.licensed_only, LABEL_LICENSED_ONLY).changed(),
     );
     if Button::new(LABEL_REFRESH)
         .icon(Icon::Refresh)
@@ -734,6 +807,7 @@ fn account(ui: &mut Ui, out: &mut SheetOutput) {
     {
         out.sign_out = true;
     }
+    changed
 }
 
 fn about(ui: &mut Ui, version: &str) {
@@ -747,7 +821,7 @@ fn about(ui: &mut Ui, version: &str) {
     ui.painter().text(
         pos2(row.left() + 74.0, row.top() + 16.0),
         Align2::LEFT_CENTER,
-        "OpenXCloud",
+        "NexaCloud",
         font_w(20.0, Weight::Bold),
         theme::TEXT_PRIMARY,
     );
@@ -766,7 +840,7 @@ fn about(ui: &mut Ui, version: &str) {
     heading(
         ui,
         "Licence",
-        "GNU General Public License v3.0. OpenXCloud is not affiliated with or endorsed by Microsoft.",
+        "GNU General Public License v3.0. NexaCloud is not affiliated with or endorsed by Microsoft.",
     );
 }
 
@@ -886,7 +960,6 @@ mod tests {
         outputs: &'a mut Vec<SheetOutput>,
     ) -> Harness<'a> {
         Harness::builder()
-            .allow_missing_glyphs()
             .with_size(egui::vec2(1280.0, 860.0))
             .with_context_setup(theme::apply)
             .build_ui(move |ui| {

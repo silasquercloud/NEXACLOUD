@@ -77,7 +77,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
 
     match icon {
         Icon::Logo => {
-            // A rounded tile with a cloud-play mark: the OpenXCloud badge.
+            // A rounded tile with a cloud-play mark: the NexaCloud badge.
             let badge = r(1.0, 1.0, 23.0, 23.0);
             painter.rect_filled(
                 badge,

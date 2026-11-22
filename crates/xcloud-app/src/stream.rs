@@ -40,9 +40,7 @@ use xcloud_input::source::{
     GamepadInputSource, POLL_INTERVAL_MS, Sampler, TriggerSide as InputTriggerSide,
 };
 use xcloud_media::{AudioOutput, Frame, FrameMailbox, FrameSink, VideoDecoder};
-use xcloud_proto::input::models::{
-    ControllerSettings, MouseFrame, PointerEventFrame, PointerFrame,
-};
+use xcloud_proto::input::models::{ControllerSettings, KeyboardFrame, MouseFrame};
 use xcloud_proto::input::packet::VibrationReport;
 use xcloud_proto::preferences::stream_resolution_to_string;
 use xcloud_proto::streaming_config::StreamingConfig;
@@ -81,8 +79,13 @@ const PUBLISH_INTERVAL_MS: u64 = 1000;
 pub type DecoderFactory = Box<dyn FnOnce(FrameSink) -> Box<dyn VideoDecoder> + Send>;
 
 /// The platform decoder: VideoToolbox on macOS (`OPENXCLOUD_SOFTWARE_VIDEO` honoured), the
-/// FFmpeg elsewhere when enabled (otherwise a counting null decoder).
-pub fn default_decoder_factory() -> DecoderFactory {
+/// FFmpeg elsewhere when enabled (otherwise a counting null decoder). `hardware_decode`
+/// (`AppSettings::hardware_decode`) selects the FFmpeg VAAPI hwaccel on Linux.
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "ffmpeg")),
+    allow(unused_variables)
+)]
+pub fn default_decoder_factory(hardware_decode: bool) -> DecoderFactory {
     // `OPENXCLOUD_SOFTWARE_VIDEO=ffmpeg` selects the portable backend when it is compiled in.
     #[cfg(feature = "ffmpeg")]
     if ffmpeg_requested() {
@@ -112,6 +115,16 @@ pub fn default_decoder_factory() -> DecoderFactory {
     #[cfg(all(target_os = "macos", not(feature = "ffmpeg")))]
     {
         Box::new(|sink| Box::new(xcloud_media::vt::VtDecoder::with_defaults(sink)))
+    }
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    if hardware_decode && std::env::var_os(xcloud_media::ffmpeg::SOFTWARE_VIDEO_ENV).is_none() {
+        return Box::new(|sink| {
+            let config = xcloud_media::ffmpeg::FfmpegConfig {
+                hwaccel: xcloud_media::ffmpeg::Hwaccel::Vaapi,
+                ..xcloud_media::ffmpeg::FfmpegConfig::default()
+            };
+            Box::new(xcloud_media::ffmpeg::FfmpegDecoder::new(config, sink))
+        });
     }
     #[cfg(all(not(target_os = "macos"), feature = "ffmpeg"))]
     {
@@ -478,22 +491,6 @@ enum InputMsg {
     },
     ReleaseAll,
     Focus(bool),
-    SetNativeInput(bool),
-    NativeKey {
-        vkey: u8,
-        pressed: bool,
-    },
-    NativeMouse {
-        x: u32,
-        y: u32,
-        wheel_x: u32,
-        wheel_y: u32,
-        buttons: u8,
-        relative: bool,
-    },
-    NativeTouch {
-        points: Vec<(u32, u32, u8, u16, u8)>,
-    },
     Settings(ControllerSettings),
     Vibration(VibrationReport),
     #[cfg(test)]
@@ -604,41 +601,6 @@ impl InputWorker {
             InputMsg::Trigger { side, value } => self.source.set_trigger(side, value),
             InputMsg::ReleaseAll => self.source.release_all(),
             InputMsg::Focus(focused) => self.source.set_input_focused(focused),
-            InputMsg::SetNativeInput(enabled) => self.source.set_native_input(enabled),
-            InputMsg::NativeKey { vkey, pressed } => {
-                self.source.send_keyboard_vkey(vkey, pressed);
-            }
-            InputMsg::NativeMouse {
-                x,
-                y,
-                wheel_x,
-                wheel_y,
-                buttons,
-                relative,
-            } => {
-                self.source.send_mouse(MouseFrame {
-                    x,
-                    y,
-                    wheel_x,
-                    wheel_y,
-                    buttons,
-                    relative,
-                });
-            }
-            InputMsg::NativeTouch { points } => {
-                self.source.send_pointer(PointerFrame {
-                    events: points
-                        .into_iter()
-                        .map(|(x, y, pressure, twist, phase)| PointerEventFrame {
-                            x,
-                            y,
-                            pressure,
-                            twist,
-                            phase,
-                        })
-                        .collect(),
-                });
-            }
             InputMsg::Settings(settings) => {
                 self.source.set_settings(settings);
                 self.vibration_intensity = settings.vibration_intensity;
@@ -883,6 +845,29 @@ impl HostCore {
                 self.input.send(InputMsg::ReleaseAll);
                 return;
             }
+            StreamCommand::SendKeyboardFrame {
+                virtual_key,
+                pressed,
+            } => {
+                self.controller
+                    .input_queue()
+                    .lock()
+                    .enqueue_keyboard_frame(KeyboardFrame::vkey(virtual_key, pressed));
+                return;
+            }
+            StreamCommand::SendMouseFrame {
+                x,
+                y,
+                wheel_x,
+                wheel_y,
+                buttons,
+            } => {
+                self.controller
+                    .input_queue()
+                    .lock()
+                    .enqueue_mouse_frame(MouseFrame::relative(x, y, wheel_x, wheel_y, buttons));
+                return;
+            }
             StreamCommand::SetInputFocused(focused) => {
                 self.input.send(InputMsg::Focus(focused));
                 let changed = {
@@ -894,41 +879,6 @@ impl HostCore {
                 if changed {
                     (self.repaint)();
                 }
-                return;
-            }
-            StreamCommand::SetNativeInputEnabled(enabled) => {
-                self.input.send(InputMsg::SetNativeInput(enabled));
-                {
-                    let mut snapshot = self.snapshot.write();
-                    snapshot.native_input_enabled = enabled;
-                }
-                (self.repaint)();
-                return;
-            }
-            StreamCommand::NativeKey { vkey, pressed } => {
-                self.input.send(InputMsg::NativeKey { vkey, pressed });
-                return;
-            }
-            StreamCommand::NativeMouse {
-                x,
-                y,
-                wheel_x,
-                wheel_y,
-                buttons,
-                relative,
-            } => {
-                self.input.send(InputMsg::NativeMouse {
-                    x,
-                    y,
-                    wheel_x,
-                    wheel_y,
-                    buttons,
-                    relative,
-                });
-                return;
-            }
-            StreamCommand::NativeTouch { points } => {
-                self.input.send(InputMsg::NativeTouch { points });
                 return;
             }
             StreamCommand::SetOutput {

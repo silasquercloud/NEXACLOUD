@@ -23,17 +23,12 @@
 //!
 //! Secrets (access, refresh, user, XSTS, gs and LPT tokens) are never logged.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine;
 use chrono::Utc;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio::time::Instant;
-use uuid::Uuid;
 
 use crate::token_store::TokenStore;
 use crate::transport::{Headers, HttpResponse, HttpTransport};
@@ -51,24 +46,6 @@ pub const SCOPE: &str = "xboxlive.signin openid profile offline_access";
 /// `MicrosoftAuthService::lptScope`.
 pub const LPT_SCOPE: &str =
     "service::http://Passport.NET/purpose::PURPOSE_XBOX_CLOUD_CONSOLE_TRANSFER_TOKEN";
-
-/// Redirect registered by the xbox.com web client. The browser lands here with
-/// `?code=...`; the app reads that URL from Chromium's history, so the user only
-/// has to sign in normally in the browser — no device code, no copying.
-pub const INTERACTIVE_REDIRECT_URI: &str = "https://www.xbox.com/auth/msa/blank.html";
-const AUTHORIZE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
-
-/// The xbox.com client is registered as a single-page application, so *every* token
-/// request it makes (auth code, refresh, LPT) must carry its Origin. Without it
-/// Microsoft rejects the request with `AADSTS90023: Tokens issued for the
-/// 'Single-Page Application' client-type should only be redeemed via cross-origin
-/// requests`.
-fn spa_headers() -> Headers {
-    vec![
-        ("Origin".to_owned(), "https://www.xbox.com".to_owned()),
-        ("Referer".to_owned(), "https://www.xbox.com/".to_owned()),
-    ]
-}
 
 /// Relying party of the XSTS token that the GSSV offering login takes
 /// (`getXstsToken`'s default argument).
@@ -96,103 +73,6 @@ enum DeviceCodePoll {
     /// Any other OAuth `error` code (`slow_down`, `expired_token`,
     /// `authorization_declined`, ...). The poll aborts on these, as the C++ does.
     OAuthError(String),
-}
-
-/// One interactive (browser) sign-in attempt: the URL to open plus the PKCE
-/// verifier and state needed to redeem the code that comes back to loopback.
-#[derive(Debug, Clone)]
-pub struct InteractiveLogin {
-    /// Open this in the user's browser.
-    pub url: String,
-    verifier: String,
-    state: String,
-}
-
-/// Chromium profile history databases, newest first. Only these are inspected,
-/// and only for the exact xbox.com sign-in redirect URL.
-fn chromium_history_files() -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-    let base = PathBuf::from(home).join(".config/chromium");
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&base) {
-        for entry in entries.flatten() {
-            let candidate = entry.path().join("History");
-            if candidate.is_file() {
-                files.push(candidate);
-            }
-        }
-    }
-    files.sort_by_key(|path| {
-        std::fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-    });
-    files.reverse();
-    files
-}
-
-/// Read the newest `blank.html?code=...` URL from one Chromium history database.
-/// The copy (including WAL) keeps SQLite from fighting the running browser.
-fn latest_auth_callback(
-    history: &Path,
-    scratch: &Path,
-    expected_state: &str,
-) -> Result<Option<String>> {
-    const SCRIPT: &str = r#"
-import json, os, shutil, sqlite3, sys
-src, tmp = sys.argv[1], sys.argv[2]
-dst = os.path.join(tmp, "History")
-for suffix in ("", "-wal", "-shm"):
-    try:
-        os.remove(dst + suffix)
-    except FileNotFoundError:
-        pass
-    try:
-        shutil.copy2(src + suffix, dst + suffix)
-    except FileNotFoundError:
-        pass
-con = sqlite3.connect(dst)
-try:
-    rows = con.execute(
-        "select url from urls where url like ? order by last_visit_time desc limit 30",
-        ("https://www.xbox.com/auth/msa/blank.html?%",),
-    ).fetchall()
-finally:
-    con.close()
-print(json.dumps([row[0] for row in rows]))
-"#;
-
-    let output = Command::new("python3")
-        .arg("-c")
-        .arg(SCRIPT)
-        .arg(history)
-        .arg(scratch)
-        .output()
-        .map_err(|e| Error::Auth(format!("Cannot read Chromium history: {e}")))?;
-    if !output.status.success() {
-        return Err(Error::Auth(format!(
-            "Chromium history query failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let urls: Vec<String> = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-        .map_err(|e| Error::Auth(format!("Invalid Chromium history result: {e}")))?;
-    for url in urls {
-        let Ok(parsed) = url::Url::parse(&url) else { continue };
-        let mut state = "";
-        let mut code = None;
-        for (key, value) in parsed.query_pairs() {
-            match key.as_ref() {
-                "state" if value.as_ref() == expected_state => state = "match",
-                "code" => code = Some(value.into_owned()),
-                _ => {}
-            }
-        }
-        if state == "match" {
-            return Ok(code);
-        }
-    }
-    Ok(None)
 }
 
 /// Result of one GSSV offering login (`gssvLogin`): gsToken, base host, regions.
@@ -229,140 +109,6 @@ impl MicrosoftAuthService {
 
     pub fn transport(&self) -> &Arc<dyn HttpTransport> {
         &self.transport
-    }
-
-    /// Start an interactive browser sign-in with the xbox.com web client: build the
-    /// Microsoft authorize URL with PKCE and a random state. The browser does the
-    /// sign-in and redirects to `https://www.xbox.com/auth/msa/blank.html?code=...`;
-    /// [`Self::wait_for_interactive_code`] reads that URL from Chromium's history.
-    pub fn begin_interactive_login(&self) -> Result<InteractiveLogin> {
-        // 96 hex characters: a valid PKCE verifier (43-128 unreserved characters).
-        let verifier = format!(
-            "{}{}{}",
-            Uuid::new_v4().simple(),
-            Uuid::new_v4().simple(),
-            Uuid::new_v4().simple()
-        );
-        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(Sha256::digest(verifier.as_bytes()));
-        let state = Uuid::new_v4().simple().to_string();
-
-        let url = url::Url::parse_with_params(
-            AUTHORIZE_URL,
-            &[
-                ("client_id", CLIENT_ID),
-                ("response_type", "code"),
-                ("response_mode", "query"),
-                ("redirect_uri", INTERACTIVE_REDIRECT_URI),
-                ("scope", SCOPE),
-                ("code_challenge", &challenge),
-                ("code_challenge_method", "S256"),
-                ("state", &state),
-                ("prompt", "select_account"),
-            ],
-        )
-        .map_err(|e| Error::Auth(format!("Invalid sign-in URL: {e}")))?
-        .to_string();
-
-        Ok(InteractiveLogin {
-            url,
-            verifier,
-            state,
-        })
-    }
-
-    /// Poll Chromium's history for the xbox.com redirect that carries the code.
-    /// The URL is only read after the user completes the normal Microsoft sign-in,
-    /// so there is no code to type and no device-code approval.
-    pub async fn wait_for_interactive_code(
-        &self,
-        login: &InteractiveLogin,
-        timeout: Duration,
-    ) -> Result<String> {
-        let deadline = Instant::now() + timeout;
-        let scratch = std::env::temp_dir().join(format!(
-            "openxcloud-history-{}",
-            Uuid::new_v4().simple()
-        ));
-        if let Err(error) = std::fs::create_dir_all(&scratch) {
-            tracing::warn!(target: LOG_TARGET, error = %error, "cannot create history scratch dir");
-        }
-        tracing::info!(target: LOG_TARGET, "waiting for the xbox.com sign-in redirect in Chromium");
-
-        loop {
-            for history in chromium_history_files() {
-                match latest_auth_callback(&history, &scratch, &login.state) {
-                    Ok(Some(code)) => {
-                        let _ = std::fs::remove_dir_all(&scratch);
-                        return Ok(code);
-                    }
-                    Ok(None) => {}
-                    Err(error) => tracing::debug!(target: LOG_TARGET, %error, "history poll skipped"),
-                }
-            }
-            if Instant::now() >= deadline {
-                let _ = std::fs::remove_dir_all(&scratch);
-                return Err(Error::Timeout(
-                    "Browser sign-in timed out. Check that Chromium opened the Microsoft page and finish signing in."
-                        .to_owned(),
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(800)).await;
-        }
-    }
-
-    /// Redeem the browser authorization code for an MSA access token (PKCE) and store it.
-    pub async fn exchange_auth_code(
-        &self,
-        login: &InteractiveLogin,
-        code: &str,
-    ) -> Result<String> {
-        let response = self
-            .post_form_with_headers(
-                TOKEN_URL,
-                &[
-                    ("client_id", CLIENT_ID),
-                    ("grant_type", "authorization_code"),
-                    ("code", code),
-                    ("redirect_uri", INTERACTIVE_REDIRECT_URI),
-                    ("scope", SCOPE),
-                    ("code_verifier", &login.verifier),
-                    // Same MSAL.js browser telemetry the xbox.com SPA sends.
-                    ("x-client-SKU", "msal.js.browser"),
-                    ("x-client-VER", "3.20.0"),
-                    ("client_info", "1"),
-                ],
-                spa_headers(),
-            )
-            .await
-            .map_err(|e| with_context("Network error", e))?;
-        let object = parse_json_object(&response.body);
-        if response.status != 200 {
-            let error = json_string(&object, "error_description");
-            return Err(Error::Auth(if error.is_empty() {
-                format!(
-                    "Sign-in token request failed HTTP {}: {}",
-                    response.status,
-                    summarize_body(&response.body)
-                )
-            } else {
-                error
-            }));
-        }
-        let access_token = json_string(&object, "access_token");
-        if access_token.is_empty() {
-            return Err(Error::Auth(format!(
-                "Invalid sign-in response: {}",
-                summarize_body(&response.body)
-            )));
-        }
-        self.store.save_msa_token(&access_token)?;
-        let refresh = json_string(&object, "refresh_token");
-        if !refresh.is_empty() {
-            self.store.save_refresh_token(&refresh)?;
-        }
-        tracing::info!(target: LOG_TARGET, "browser sign-in authorized");
-        Ok(access_token)
     }
 
     /// Step 1: request a device code for browser sign-in.
@@ -512,7 +258,7 @@ impl MicrosoftAuthService {
     /// Exchanges a stored MSA refresh token for a new access token (and stores both).
     pub async fn refresh_msa_token(&self, refresh_token: &str) -> Result<String> {
         let response = self
-            .post_form_with_headers(
+            .post_form(
                 TOKEN_URL,
                 &[
                     ("client_id", CLIENT_ID),
@@ -520,7 +266,6 @@ impl MicrosoftAuthService {
                     ("refresh_token", refresh_token),
                     ("scope", SCOPE),
                 ],
-                spa_headers(),
             )
             .await
             .map_err(|e| with_context("Network error", e))?;
@@ -550,7 +295,7 @@ impl MicrosoftAuthService {
     /// token when Microsoft issued a new one.
     pub async fn fetch_lpt(&self, refresh_token: &str) -> Result<String> {
         let response = self
-            .post_form_with_headers(
+            .post_form(
                 LIVE_TOKEN_URL,
                 &[
                     ("client_id", CLIENT_ID),
@@ -558,7 +303,6 @@ impl MicrosoftAuthService {
                     ("refresh_token", refresh_token),
                     ("scope", LPT_SCOPE),
                 ],
-                spa_headers(),
             )
             .await
             .map_err(|e| with_context("Network error", e))?;
@@ -655,14 +399,9 @@ impl MicrosoftAuthService {
             .gssv_login(xsts_token, "xhome")
             .await
             .map_err(|e| with_context("Token exchange failed", e))?;
-        // The gs token is a readable JWT; its `userid`/`xuid` claims identify the signed-in
-        // account so the UI can show who is logged in.
-        let (gamertag, xuid) = jwt_identity(&home.gs_token);
         let mut tokens = StreamTokens {
             xhome_token: home.gs_token,
             xhome_host: home.base_host,
-            gamertag,
-            xuid,
             ..StreamTokens::default()
         };
 
@@ -746,22 +485,7 @@ impl MicrosoftAuthService {
     /// POSTs a form body (`postForm` helper): `Accept: application/json` plus the
     /// `Content-Type` the transport adds.
     async fn post_form(&self, url: &str, fields: &[(&str, &str)]) -> Result<HttpResponse> {
-        self.post_form_with_headers(url, fields, Vec::new()).await
-    }
-
-    /// Same as [`Self::post_form`], with extra headers. The xbox.com web client is
-    /// registered as a single-page application, so redeeming one of its auth codes
-    /// requires the `Origin` (and `Referer`) of that SPA; otherwise Microsoft rejects
-    /// it with `AADSTS90023: Tokens issued for the 'Single-Page Application'
-    /// client-type should only be redeemed via cross-origin requests`.
-    async fn post_form_with_headers(
-        &self,
-        url: &str,
-        fields: &[(&str, &str)],
-        extra: Headers,
-    ) -> Result<HttpResponse> {
-        let mut headers: Headers = vec![("Accept".to_owned(), "application/json".to_owned())];
-        headers.extend(extra);
+        let headers: Headers = vec![("Accept".to_owned(), "application/json".to_owned())];
         self.transport
             .post_form(url, form_encode(fields), headers)
             .await
@@ -900,22 +624,6 @@ fn xbox_token_from(object: &Value) -> XboxToken {
         token: json_string(object, "Token"),
         user_hash,
     }
-}
-
-/// Reads the `userid`/`xuid` claims from the payload of a (readable, non-encrypted)
-/// JWT such as the GSSV gs token. Never fails: on any malformed input it returns two
-/// empty strings so the account UI simply has no identity to show.
-fn jwt_identity(token: &str) -> (String, String) {
-    let payload = token.split('.').nth(1).unwrap_or("");
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(payload))
-        .unwrap_or_default();
-    let object = parse_json_object(&decoded);
-    (
-        json_string(&object, "userid"),
-        json_string(&object, "xuid"),
-    )
 }
 
 /// Transport-level failures that the device-code poll should retry.

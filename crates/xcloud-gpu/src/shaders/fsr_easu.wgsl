@@ -51,17 +51,8 @@ struct EasuParams {
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> c: EasuParams;
-
-@vertex
-fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
-    var verts = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
-    return vec4<f32>(verts[vi], 0.0, 1.0);
-}
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> c: EasuParams;
 
 // ---- ffx_a.h approximations --------------------------------------------------------
 
@@ -195,9 +186,12 @@ fn easu_set(
 }
 
 // FsrEasuF
-@fragment
-fn easu(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let gid = vec2<u32>(pos.xy);
+@compute @workgroup_size(16, 16, 1)
+fn easu(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let out_size = textureDimensions(dst);
+    if (gid.x >= out_size.x || gid.y >= out_size.y) {
+        return;
+    }
     let in_size = vec2<i32>(textureDimensions(src));
 
     // Get position of 'f'.
@@ -291,5 +285,5 @@ fn easu(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     // Normalize and dering.
     let pix = min(max4, max(min4, ac * vec3<f32>(1.0 / aw)));
-    return vec4<f32>(pix, 1.0);
+    textureStore(dst, gid.xy, vec4<f32>(pix, 1.0));
 }

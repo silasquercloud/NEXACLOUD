@@ -13,11 +13,11 @@ members = [
 default-members = ["crates/xcloud-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0-alpha.final"
 edition = "2024"
 license = "GPL-3.0-only"
 rust-version = "1.99"
-repository = "https://github.com/shyim/openxcloud"
+repository = "https://github.com/shyim/nexacloud"
 
 [workspace.dependencies]
 # internal
@@ -40,16 +40,16 @@ bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-base64 = "0.22"
+base64 = "0.23"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-parking_lot = "0.12"
+parking_lot = "0.13"
 crossbeam-channel = "0.5"
 triple_buffer = "9"
 rtrb = "0.4"
 
 # async / net
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip"] }
 async-trait = "0.1"
 
@@ -68,9 +68,9 @@ open = "5"
 
 # media
 h264-reader = "0.9"
-# BtbN "latest" traz enums mais novos que o ffmpeg-next 9 conhece; a feature
-# acrescenta braços curinga nos matchings e evita E0004 no cross-build Windows.
-ffmpeg-next = { version = "9", features = ["non-exhaustive-enums"] }
+# Decoder (avcodec) and swscale; ffmpeg-next's codec module also needs `format`. The
+# unused filter, device and resampling libraries stay out of the Windows and macOS bundles.
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
 opus = "0.4"
 cpal = "0.18"
 
@@ -85,6 +85,9 @@ objc2-video-toolbox = "0.3"
 objc2-metal = "0.3"
 objc2-metal-fx = "0.3"
 objc2-game-controller = "0.3"
+# windows (same major as wgpu-hal's DX12 backend, so its D3D12 types are ours)
+windows = "0.62"
+winresource = "0.1"
 
 # input
 gilrs = "0.11"
@@ -96,6 +99,14 @@ clap = { version = "4", features = ["derive"] }
 debug = 1
 lto = "thin"
 codegen-units = 4
+
+# Faster iterative release builds for local testing.
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = 0
+strip = "debuginfo"
 
 [profile.dev.package."*"]
 opt-level = 2

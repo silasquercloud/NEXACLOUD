@@ -104,8 +104,6 @@ pub struct SessionSnapshot {
     pub verification_uri_complete: String,
     /// `DeviceCodeInfo::signInUrl()`: the URL the UI opens.
     pub sign_in_url: String,
-    /// Gamertag of the signed-in account (decoded from the stream token).
-    pub gamertag: String,
     pub last_error: String,
     pub is_busy: bool,
     pub status_text: String,
@@ -198,6 +196,8 @@ pub enum LibraryCommand {
     SetBrowseShelf(String),
     /// Store language/market for catalog text (`de-DE`); reloads a loaded library.
     SetLocale(String),
+    /// Hide titles the account is not entitled to; reloads a loaded library.
+    SetLicensedOnly(bool),
 }
 
 pub type LibraryHandle = Handle<LibrarySnapshot, LibraryCommand>;
@@ -251,8 +251,6 @@ pub struct StreamSnapshot {
     pub controller_connected: bool,
     pub controller_name: String,
     pub input_focused: bool,
-    /// Native keyboard/mouse input is enabled for this stream.
-    pub native_input_enabled: bool,
 }
 
 impl StreamSnapshot {
@@ -308,25 +306,20 @@ pub enum StreamCommand {
         value: f64,
     },
     ReleaseAll,
-    SetInputFocused(bool),
-    /// Enables native keyboard/mouse input (xCloud `KEYBOARD`/`MOUSE` reports)
-    /// instead of the virtual-controller fallback.
-    SetNativeInputEnabled(bool),
-    /// A native keyboard event (Windows VKey code) for games with native KB support.
-    NativeKey { vkey: u8, pressed: bool },
-    /// A native mouse event (movement/buttons/wheel).
-    NativeMouse {
-        x: u32,
-        y: u32,
-        wheel_x: u32,
-        wheel_y: u32,
+    /// Native xCloud keyboard report (Windows virtual-key code).
+    SendKeyboardFrame {
+        virtual_key: u8,
+        pressed: bool,
+    },
+    /// Native xCloud relative mouse report (movement/buttons/wheel).
+    SendMouseFrame {
+        x: i32,
+        y: i32,
+        wheel_x: i32,
+        wheel_y: i32,
         buttons: u8,
-        relative: bool,
     },
-    /// Native touch events (Android), in server-video pixel coordinates.
-    NativeTouch {
-        points: Vec<(u32, u32, u8, u16, u8)>,
-    },
+    SetInputFocused(bool),
     /// Reported by the stream view after the renderer ran (`setOutput`). `present_ms` is
     /// the renderer's last present latency (see [`StreamSnapshot::present_ms`]);
     /// `upscaler_label` is the renderer's HUD suffix (see [`StreamSnapshot::upscaler_label`]).
@@ -365,7 +358,7 @@ pub struct AppSettings {
     pub swap_ab: bool,
     pub trigger_sensitivity: f64,
     pub vibration_intensity: f64,
-    /// New in the Rust port: "immediate" (default for the stream view) | "fifo".
+    /// "immediate" (default), "fifo" (vsync) or "off" (vsync desligado, sem cap por present).
     pub present_mode: String,
     /// New in the Rust port: FSR sharpness 0..2 and an upscaler on/off switch.
     pub upscale_enabled: bool,
@@ -376,6 +369,21 @@ pub struct AppSettings {
     /// or "metalfx" (macOS, `--features metalfx`; falls back to FSR when unavailable).
     /// `OPENXCLOUD_UPSCALER` overrides it (`xcloud_gpu::UPSCALER_ENV`).
     pub upscaler: String,
+    /// New in the Rust port: decode with VAAPI on Linux (opt-in, read at start-up).
+    /// `OPENXCLOUD_SOFTWARE_VIDEO` still forces software decoding.
+    pub hardware_decode: bool,
+    /// New in the Rust port: list only titles the account is entitled to (subscription
+    /// or purchase).
+    pub licensed_only: bool,
+    /// Send native xCloud keyboard/mouse reports instead of mapping keys to a
+    /// virtual controller. Requires a title with native MKB support.
+    pub native_mkb: bool,
+    /// Stretch video to fill the window (ignores aspect ratio).
+    pub stretch_video: bool,
+    /// Extra zoom applied to the stream image (1.0 = default).
+    pub video_zoom: f32,
+    /// Show performance/stats overlay in stream.
+    pub show_stats: bool,
 }
 
 impl Default for AppSettings {
@@ -399,6 +407,12 @@ impl Default for AppSettings {
             upscale_height: 2160,
             sharpness: 0.25,
             upscaler: "fsr".into(),
+            hardware_decode: false,
+            licensed_only: false,
+            native_mkb: true,
+            stretch_video: false,
+            video_zoom: 1.0,
+            show_stats: false,
         }
     }
 }

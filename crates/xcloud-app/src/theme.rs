@@ -1,13 +1,14 @@
-//! The OpenXCloud design system: colours, typography, metrics and the egui style.
+//! The NexaCloud design system: colours, typography, metrics and the egui style.
 //!
 //! The look is a dark, graphite "console dashboard": a near-black canvas, cards one
-//! step lighter, white for selection and emphasis, and the OpenXCloud lime only where an
-//! action should pull the eye (Play, primary buttons, focus rings, the logo). Game
+//! step lighter (with a violet tint), white for selection and emphasis, and the NexaCloud
+//! violet only where an action should pull the eye (Play, primary buttons, focus rings, the logo). Game
 //! artwork supplies the colour; the chrome stays neutral.
 //!
 //! Typography uses the system UI font at real weights: on macOS the variable
 //! `SFNS.ttf` is registered four times with different `wght` coordinates
 //! ([`Weight`]); elsewhere every weight falls back to egui's bundled font.
+//! Bundled DejaVu Sans and Noto Sans CJK cover arrows and all locale names on every platform.
 //!
 //! The constant names of the QML port (`BACKGROUND`, `SURFACE`, `ACCENT`, …) are
 //! kept so the stream view and HUD pick up the new palette unchanged.
@@ -21,23 +22,23 @@ use egui::{Color32, CornerRadius, FontId, Shadow, Stroke, TextStyle, Visuals};
 // ----------------------------------------------------------------------------- colours
 
 /// Window canvas.
-pub const BACKGROUND: Color32 = Color32::from_rgb(0x0c, 0x0d, 0x0f);
+pub const BACKGROUND: Color32 = Color32::from_rgb(0x0b, 0x09, 0x12);
 /// Cards, sidebar panels, inputs.
-pub const SURFACE: Color32 = Color32::from_rgb(0x17, 0x19, 0x1c);
+pub const SURFACE: Color32 = Color32::from_rgb(0x16, 0x13, 0x20);
 /// Hovered cards and controls; neutral buttons.
-pub const SURFACE_HIGH: Color32 = Color32::from_rgb(0x21, 0x24, 0x28);
+pub const SURFACE_HIGH: Color32 = Color32::from_rgb(0x22, 0x1c, 0x30);
 /// Selected navigation entries and pressed controls.
-pub const SURFACE_HIGHER: Color32 = Color32::from_rgb(0x2b, 0x2f, 0x34);
+pub const SURFACE_HIGHER: Color32 = Color32::from_rgb(0x2e, 0x26, 0x3f);
 /// Floating glass (over artwork): round icons, overlay pills.
-pub const SURFACE_GLASS: Color32 = Color32::from_rgba_premultiplied(0x10, 0x11, 0x13, 0xb8);
+pub const SURFACE_GLASS: Color32 = Color32::from_rgba_premultiplied(0x12, 0x0d, 0x1b, 0xb8);
 /// Modal sheets (settings).
-pub const SHEET: Color32 = Color32::from_rgb(0x1b, 0x1d, 0x21);
+pub const SHEET: Color32 = Color32::from_rgb(0x1a, 0x15, 0x25);
 /// Settings category column.
-pub const SHEET_SIDE: Color32 = Color32::from_rgb(0x15, 0x17, 0x1a);
+pub const SHEET_SIDE: Color32 = Color32::from_rgb(0x13, 0x10, 0x1c);
 /// Hairlines and card outlines.
-pub const BORDER: Color32 = Color32::from_rgb(0x26, 0x29, 0x2e);
-/// The OpenXCloud lime: Play, primary actions, focus.
-pub const ACCENT: Color32 = Color32::from_rgb(0xb8, 0xf0, 0x5a);
+pub const BORDER: Color32 = Color32::from_rgb(0x2e, 0x27, 0x3d);
+/// The NexaCloud violet: Play, primary actions, focus.
+pub const ACCENT: Color32 = Color32::from_rgb(0xa8, 0x7b, 0xff);
 /// Primary text.
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xf4, 0xf5, 0xf7);
 /// Secondary text (publishers, captions).
@@ -50,21 +51,21 @@ pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x7a, 0x6e);
 pub const SUCCESS: Color32 = Color32::from_rgb(0x3d, 0xd6, 0x8c);
 
 /// Text on an accent fill.
-pub const ON_ACCENT: Color32 = Color32::from_rgb(0x0e, 0x14, 0x05);
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0x12, 0x0a, 0x1e);
 /// Text on a white (selected) fill.
 pub const ON_WHITE: Color32 = Color32::from_rgb(0x0c, 0x0d, 0x0f);
 /// Sidebar cards.
 pub const SIDEBAR: Color32 = SURFACE;
 /// Selected sidebar entry.
 pub const SIDEBAR_SELECTED: Color32 = SURFACE_HIGHER;
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xc9, 0xf7, 0x7c);
-pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0x9c, 0xd4, 0x40);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xbd, 0x96, 0xff);
+pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0x8b, 0x5c, 0xe6);
 /// Fill behind hero artwork while it loads.
-pub const HERO_FILL: Color32 = Color32::from_rgb(0x14, 0x1a, 0x14);
+pub const HERO_FILL: Color32 = Color32::from_rgb(0x1a, 0x14, 0x25);
 /// Body copy over hero artwork.
-pub const HERO_BODY_TEXT: Color32 = Color32::from_rgb(0xd6, 0xd9, 0xde);
-/// The ambient glow at the top of the browse pages (a dark lime).
-pub const GLOW: Color32 = Color32::from_rgb(0x1d, 0x2b, 0x14);
+pub const HERO_BODY_TEXT: Color32 = Color32::from_rgb(0xd9, 0xd6, 0xde);
+/// The ambient glow at the top of the browse pages (a dark violet).
+pub const GLOW: Color32 = Color32::from_rgb(0x24, 0x14, 0x3d);
 /// Scrim over the window behind modal sheets.
 pub const SCRIM: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 0xb0);
 
@@ -297,8 +298,8 @@ const SYMBOL_FALLBACK_FONTS: &[(&str, &str)] = &[
 const SYMBOL_FALLBACK_FONTS: &[(&str, &str)] = &[];
 
 /// Builds the font set: the system UI font at every [`Weight`] in front of egui's
-/// bundled fonts, then the symbol fallbacks. Returns the definitions and whether the
-/// system font was found.
+/// fonts, bundled DejaVu Sans and Noto Sans CJK, then platform symbol fallbacks. Returns the definitions
+/// and whether the system font was found.
 pub fn font_definitions() -> (FontDefinitions, bool) {
     let mut defs = FontDefinitions::default();
     let bundled: Vec<String> = defs
@@ -325,6 +326,25 @@ pub fn font_definitions() -> (FontDefinitions, bool) {
         }
         family.extend(bundled.iter().cloned());
         defs.families.insert(weight.family(), family);
+    }
+
+    // Named weight families need the same portable glyph coverage as proportional.
+    // Keep this after the primary fonts so their typography remains unchanged.
+    for (name, bytes) in [
+        (
+            "DejaVu Sans",
+            include_bytes!("../../../assets/fonts/DejaVuSans.ttf").as_slice(),
+        ),
+        (
+            "Noto Sans CJK",
+            include_bytes!("../../../assets/fonts/NotoSansCJKkr-Regular.otf").as_slice(),
+        ),
+    ] {
+        defs.font_data
+            .insert(name.to_owned(), Arc::new(FontData::from_static(bytes)));
+        for family in defs.families.values_mut() {
+            family.push(name.to_owned());
+        }
     }
 
     for (name, path) in SYMBOL_FALLBACK_FONTS {
@@ -396,8 +416,8 @@ mod tests {
 
     #[test]
     fn hex_colours_parse() {
-        assert_eq!(qml_color("#0c0d0f"), Some(BACKGROUND));
-        assert_eq!(qml_color("#b8f05a"), Some(ACCENT));
+        assert_eq!(qml_color("#0b0912"), Some(BACKGROUND));
+        assert_eq!(qml_color("#a87bff"), Some(ACCENT));
         assert_eq!(
             qml_color("#55000000"),
             Some(Color32::from_rgba_unmultiplied(0, 0, 0, 0x55))
@@ -434,6 +454,41 @@ mod tests {
             let family = defs.families.get(&weight.family());
             assert!(family.is_some_and(|f| !f.is_empty()), "{weight:?}");
         }
+    }
+
+    #[test]
+    fn bundled_fonts_cover_hud_and_all_locale_glyphs_in_every_family() {
+        let (mut defs, _) = font_definitions();
+        // Simulate a host without platform fonts, even when running on macOS.
+        let defaults = FontDefinitions::default();
+        defs.font_data.retain(|name, _| {
+            defaults.font_data.contains_key(name)
+                || matches!(name.as_str(), "DejaVu Sans" | "Noto Sans CJK")
+        });
+        for family in defs.families.values_mut() {
+            family.retain(|name| defs.font_data.contains_key(name));
+        }
+        let ctx = egui::Context::default();
+        ctx.set_font_providers(vec![]);
+        ctx.set_fonts(defs);
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            ui.fonts_mut(|fonts| {
+                let families = Weight::ALL
+                    .map(Weight::family)
+                    .into_iter()
+                    .chain([FontFamily::Monospace]);
+                for family in families {
+                    let font = FontId::new(15.0, family);
+                    let locale_names = xcloud_proto::locales::LOCALES
+                        .iter()
+                        .flat_map(|locale| locale.native.chars());
+                    for ch in "1440p → 2160p FSR".chars().chain(locale_names) {
+                        assert!(fonts.has_glyph(&font, ch), "{font:?} lacks {ch:?}");
+                    }
+                }
+            });
+        });
+        output.textures_delta.clear();
     }
 
     #[test]

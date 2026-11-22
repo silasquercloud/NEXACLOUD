@@ -21,9 +21,7 @@ use tracing::info;
 use xcloud_proto::input::gamepad::{
     ChordDefinition, ChordRecognizer, GamepadHandler, RawGamepadState, ShortcutAction,
 };
-use xcloud_proto::input::models::{
-    ControllerSettings, GamepadButtons, KeyboardFrame, MouseFrame, PointerFrame, Vec2,
-};
+use xcloud_proto::input::models::{ControllerSettings, GamepadButtons, Vec2};
 use xcloud_proto::input::queue::InputQueue;
 
 /// The `QTimer` interval of the Qt source (`Qt::PreciseTimer`, 8 ms = 125 Hz).
@@ -111,9 +109,6 @@ pub struct GamepadInputSource {
     pressed: HashSet<&'static str>,
     active: bool,
     connected: bool,
-    /// When true, keyboard/mouse events are sent as native xCloud input reports
-    /// instead of being mapped onto a virtual gamepad.
-    native_input: bool,
 }
 
 impl std::fmt::Debug for GamepadInputSource {
@@ -146,7 +141,6 @@ impl GamepadInputSource {
             pressed: HashSet::new(),
             active: false,
             connected: false,
-            native_input: false,
         }
     }
 
@@ -287,50 +281,6 @@ impl GamepadInputSource {
     /// Names of the keyboard buttons currently held (the C++ `m_pressed` set).
     pub fn pressed_keys(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.pressed.iter().copied()
-    }
-
-    /// Enqueues a **native** keyboard event (Windows VKey) straight into the input
-    /// queue, bypassing the virtual-controller mapping. Used when the game supports
-    /// native keyboard input on xCloud (e.g. Fortnite).
-    pub fn send_keyboard_vkey(&self, key_code: u8, pressed: bool) {
-        if !self.focused {
-            return;
-        }
-        if let Some(queue) = &self.queue {
-            queue
-                .lock()
-                .enqueue_keyboard_frame(KeyboardFrame::vkey(key_code, pressed));
-        }
-    }
-
-    /// Enqueues a native mouse event (absolute or relative) into the input queue.
-    pub fn send_mouse(&self, frame: MouseFrame) {
-        if !self.focused {
-            return;
-        }
-        if let Some(queue) = &self.queue {
-            queue.lock().enqueue_mouse_frame(frame);
-        }
-    }
-
-    /// Enqueues native touch/pointer events into the input queue (Android).
-    pub fn send_pointer(&self, frame: PointerFrame) {
-        if !self.focused {
-            return;
-        }
-        if let Some(queue) = &self.queue {
-            queue.lock().enqueue_pointer_frame(frame);
-        }
-    }
-
-    /// True when native keyboard/mouse input is enabled for this stream.
-    pub fn native_input_enabled(&self) -> bool {
-        self.native_input
-    }
-
-    /// Enables or disables native keyboard/mouse input.
-    pub fn set_native_input(&mut self, enabled: bool) {
-        self.native_input = enabled;
     }
 
     /// Normalised pointer/keyboard left stick in `-1..=1` (GameController y-up).

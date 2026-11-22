@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible OpenXCloud problem.
+description: Report a reproducible NexaCloud problem.
 body:
   - type: markdown
     attributes:

@@ -1,6 +1,6 @@
 # Third-party notices
 
-OpenXCloud is licensed under GPL-3.0-only. The full licence is in
+NexaCloud is licensed under GPL-3.0-only. The full licence is in
 [LICENSE](LICENSE). Third-party components retain their respective licences
 and notices, as described below.
 

@@ -6,5 +6,4 @@ pub mod library_view;
 pub mod settings_sheet;
 pub mod signin;
 pub mod stream_view;
-pub mod vkey;
 pub mod widgets;

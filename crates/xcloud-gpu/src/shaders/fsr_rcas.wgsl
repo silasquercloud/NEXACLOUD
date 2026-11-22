@@ -35,17 +35,8 @@ struct RcasParams {
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> c: RcasParams;
-
-@vertex
-fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
-    var verts = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
-    return vec4<f32>(verts[vi], 0.0, 1.0);
-}
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> c: RcasParams;
 
 // This is set at the limit of providing unnatural results for sharpening.
 const FSR_RCAS_LIMIT: f32 = 0.25 - (1.0 / 16.0);
@@ -70,10 +61,14 @@ fn load_src(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
 }
 
 // FsrRcasF
-@fragment
-fn rcas(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+@compute @workgroup_size(16, 16, 1)
+fn rcas(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let out_size = textureDimensions(dst);
+    if (gid.x >= out_size.x || gid.y >= out_size.y) {
+        return;
+    }
     let size = vec2<i32>(textureDimensions(src));
-    let sp = vec2<i32>(pos.xy);
+    let sp = vec2<i32>(gid.xy);
 
     // Algorithm uses minimal 3x3 pixel neighborhood.
     //    b
@@ -116,5 +111,5 @@ fn rcas(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Resolve, which needs the medium precision rcp approximation to avoid visible tonality changes.
     let rcp_l = aprx_med_rcp(4.0 * lobe + 1.0);
     let pix = (lobe * b + lobe * d + lobe * h + lobe * f + e) * rcp_l;
-    return vec4<f32>(pix, 1.0);
+    textureStore(dst, gid.xy, vec4<f32>(pix, 1.0));
 }

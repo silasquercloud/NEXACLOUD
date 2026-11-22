@@ -70,6 +70,12 @@ impl VideoTexture {
     /// until something is registered.
     pub fn draw(&self, painter: &egui::Painter, available: Rect, width: u32, height: u32) -> Rect {
         let rect = letterbox(available, width, height);
+        self.draw_rect(painter, rect);
+        rect
+    }
+
+    /// Draws the video into an explicit rect.
+    pub fn draw_rect(&self, painter: &egui::Painter, rect: Rect) {
         if let Some(id) = self.id {
             painter.image(
                 id,
@@ -78,7 +84,6 @@ impl VideoTexture {
                 Color32::WHITE,
             );
         }
-        rect
     }
 }
 

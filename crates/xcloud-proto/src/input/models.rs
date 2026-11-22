@@ -238,62 +238,56 @@ pub struct GamepadInputFrame {
     pub triggers: Vec2,
 }
 
-/// One native keyboard event sent over the `input` data channel (report bit `KEYBOARD`).
-///
-/// The wire format is three bytes: key kind (`2` = virtual key / `VKey`), pressed flag,
-/// and the Windows virtual-key code. Mirrors `xbox-xcloud-player`'s `KeyboardFrame`.
+/// One native keyboard event. Encoded as three bytes in a `KEYBOARD` report:
+/// `[kind, pressed, virtual_key]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct KeyboardFrame {
-    /// `1` = Known, `2` = VKey (what we send), `3` = AppCommand, `0` = Unknown.
-    pub key_type: u8,
+    /// `1` = known key, `2` = Windows virtual key (what the browser sends),
+    /// `3` = app command, `0` = unknown.
+    pub kind: u8,
     pub pressed: bool,
-    /// Windows virtual-key code (e.g. `0x57` for `W`).
-    pub key_code: u8,
+    /// Windows Virtual-Key code (`VK_*`).
+    pub virtual_key: u8,
 }
 
 impl KeyboardFrame {
-    /// A Windows virtual-key press/release event (`key_type = 2`).
-    pub const fn vkey(key_code: u8, pressed: bool) -> Self {
+    /// Browser-compatible VKey event (`kind = 2`).
+    pub fn vkey(virtual_key: u8, pressed: bool) -> Self {
         Self {
-            key_type: 2,
+            kind: 2,
             pressed,
-            key_code,
+            virtual_key,
         }
     }
 }
 
-/// One native mouse event (report bit `MOUSE`). Mirrors the browser client's
-/// `MouseFrame`:absolute or relative coordinates, wheel and button bitmask.
+/// One native mouse event. Encoded as 18 bytes in a `MOUSE` report:
+/// four LE `u32` (x, y, wheel x, wheel y), a button bitmask and a relative flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MouseFrame {
-    /// Absolute position or relative delta X, depending on [`Self::relative`].
-    pub x: u32,
-    pub y: u32,
-    pub wheel_x: u32,
-    pub wheel_y: u32,
-    /// Bitmask: bit 0 = left, 1 = right, 2 = middle.
+    /// Relative X movement; negative values are sent as wrapping `u32`.
+    pub x: i32,
+    /// Relative Y movement; negative values are sent as wrapping `u32`.
+    pub y: i32,
+    pub wheel_x: i32,
+    pub wheel_y: i32,
+    /// Bit 0 = left, bit 1 = right, bit 2 = middle, as in `PointerEvent.buttons`.
     pub buttons: u8,
-    /// `1` for relative movement, `0` for absolute.
-    pub relative: bool,
+    /// `0` = relative, `1` = absolute.
+    pub relative: u8,
 }
 
-/// One native pointer/touch event (report bit `POINTER`). Used by the Android
-/// client for native touch; coordinates are in server-video pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct PointerEventFrame {
-    pub x: u32,
-    pub y: u32,
-    /// Contact pressure `0..=255`.
-    pub pressure: u8,
-    pub twist: u16,
-    /// `1` = down, `2` = up, `3` = move, `0` = cancel.
-    pub phase: u8,
-}
-
-/// A pointer report containing one or more touch/pen contacts.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PointerFrame {
-    pub events: Vec<PointerEventFrame>,
+impl MouseFrame {
+    pub fn relative(x: i32, y: i32, wheel_x: i32, wheel_y: i32, buttons: u8) -> Self {
+        Self {
+            x,
+            y,
+            wheel_x,
+            wheel_y,
+            buttons,
+            relative: 0,
+        }
+    }
 }
 
 /// Frame timing markers piggybacked on input packets for server diagnostics.

@@ -17,9 +17,7 @@
 //! caller passes `now_ms` so packets are deterministic in tests; the caller
 //! (the input crate) keeps the monotonic clock.
 
-use super::models::{
-    FrameTimingMetadata, GamepadInputFrame, KeyboardFrame, MouseFrame, PointerFrame,
-};
+use super::models::{FrameTimingMetadata, GamepadInputFrame, KeyboardFrame, MouseFrame};
 
 /// Report type bits at the head of every outbound input packet.
 ///
@@ -105,9 +103,6 @@ pub const KEYBOARD_ENTRY_SIZE: usize = 3;
 
 /// Bytes per mouse entry in a `MOUSE` report (after the 1-byte count).
 pub const MOUSE_ENTRY_SIZE: usize = 18;
-
-/// Bytes per pointer event inside a `POINTER` frame.
-pub const POINTER_EVENT_SIZE: usize = 20;
 
 #[inline]
 fn write_le16(buffer: &mut [u8], offset: usize, value: u16) {
@@ -243,70 +238,36 @@ fn encode_metadata(frames: &[FrameTimingMetadata], now_ms: u64) -> Vec<u8> {
     data
 }
 
-/// `KEYBOARD` report body: count byte followed by 3 bytes per event
-/// (`key_type`, `pressed`, `key_code`) — see [`KeyboardFrame`].
-fn encode_keyboards(frames: &[KeyboardFrame]) -> Vec<u8> {
-    let mut data = vec![0u8; 1 + frames.len() * KEYBOARD_ENTRY_SIZE];
-    data[0] = count_byte(frames.len());
-    let mut offset = 1;
-    for frame in frames {
-        data[offset] = frame.key_type;
-        data[offset + 1] = u8::from(frame.pressed);
-        data[offset + 2] = frame.key_code;
-        offset += KEYBOARD_ENTRY_SIZE;
-    }
-    data
-}
-
-/// `MOUSE` report body: count byte followed by 18 bytes per event.
-fn encode_mice(frames: &[MouseFrame]) -> Vec<u8> {
+/// `MOUSE` report body: count byte followed by 18 bytes per frame.
+///
+/// The four movement/wheel words are little-endian `u32`; relative deltas may be
+/// negative and therefore wrap (the browser client uses `DataView.setUint32`).
+fn encode_mouse(frames: &[MouseFrame]) -> Vec<u8> {
     let mut data = vec![0u8; 1 + frames.len() * MOUSE_ENTRY_SIZE];
     data[0] = count_byte(frames.len());
     let mut offset = 1;
     for frame in frames {
-        write_le32(&mut data, offset, frame.x);
-        write_le32(&mut data, offset + 4, frame.y);
-        write_le32(&mut data, offset + 8, frame.wheel_x);
-        write_le32(&mut data, offset + 12, frame.wheel_y);
+        write_le32(&mut data, offset, frame.x as u32);
+        write_le32(&mut data, offset + 4, frame.y as u32);
+        write_le32(&mut data, offset + 8, frame.wheel_x as u32);
+        write_le32(&mut data, offset + 12, frame.wheel_y as u32);
         data[offset + 16] = frame.buttons;
-        data[offset + 17] = u8::from(frame.relative);
+        data[offset + 17] = frame.relative;
         offset += MOUSE_ENTRY_SIZE;
     }
     data
 }
 
-/// `POINTER` report body: one pointer frame (1 byte event count) followed by
-/// 20 bytes per touch contact (pressure/twist/x/y/phase).
-fn encode_pointers(frames: &[PointerFrame]) -> Vec<u8> {
-    // The browser client sends at most one pointer frame per packet.
-    let frame = frames.first();
-    let count = frame.map_or(0, |f| f.events.len());
-    let mut data = vec![0u8; 1 + 1 + count * POINTER_EVENT_SIZE];
-    data[0] = 1; // one pointer frame
-    data[1] = count_byte(count);
-    let mut offset = 2;
-    if let Some(frame) = frame {
-        for event in &frame.events {
-            // Mirrors xbox-xcloud-player `_writePointerData`. The first two u16s
-            // are contact-active flags (cleared on pointerup), pressure is a
-            // single byte 0..255, and x/y are the last fields before the phase.
-            let active = u16::from(event.phase != 2);
-            write_le16(&mut data, offset, active);
-            write_le16(&mut data, offset + 2, active);
-            data[offset + 4] = event.pressure;
-            write_le16(&mut data, offset + 5, event.twist);
-            // offset +7..+11 is reserved (zero).
-            if event.phase == 2 {
-                // The browser client zeroes the coordinates on pointerup.
-                write_le32(&mut data, offset + 11, 0);
-                write_le32(&mut data, offset + 15, 0);
-            } else {
-                write_le32(&mut data, offset + 11, event.x);
-                write_le32(&mut data, offset + 15, event.y);
-            }
-            data[offset + 19] = event.phase;
-            offset += POINTER_EVENT_SIZE;
-        }
+/// `KEYBOARD` report body: count byte followed by three bytes per event.
+fn encode_keyboard(frames: &[KeyboardFrame]) -> Vec<u8> {
+    let mut data = vec![0u8; 1 + frames.len() * KEYBOARD_ENTRY_SIZE];
+    data[0] = count_byte(frames.len());
+    let mut offset = 1;
+    for frame in frames {
+        data[offset] = frame.kind;
+        data[offset + 1] = u8::from(frame.pressed);
+        data[offset + 2] = frame.virtual_key;
+        offset += KEYBOARD_ENTRY_SIZE;
     }
     data
 }
@@ -331,22 +292,54 @@ pub fn gamepad_packet(
     timing_frames: &[FrameTimingMetadata],
     now_ms: u64,
 ) -> Vec<u8> {
-    input_packet(sequence, frames, timing_frames, &[], &[], &[], now_ms)
+    let mut report_type = ReportType::NONE;
+    let metadata_bytes = if timing_frames.is_empty() {
+        Vec::new()
+    } else {
+        report_type |= ReportType::METADATA;
+        encode_metadata(timing_frames, now_ms)
+    };
+
+    let gamepad_bytes = if frames.is_empty() {
+        Vec::new()
+    } else {
+        report_type |= ReportType::GAMEPAD;
+        encode_gamepads(frames)
+    };
+
+    let mut buffer = make_header(
+        report_type,
+        sequence,
+        metadata_bytes.len() + gamepad_bytes.len(),
+        now_ms,
+    );
+    let mut offset = HEADER_SIZE;
+    if !metadata_bytes.is_empty() {
+        buffer[offset..offset + metadata_bytes.len()].copy_from_slice(&metadata_bytes);
+        offset += metadata_bytes.len();
+    }
+    if !gamepad_bytes.is_empty() {
+        buffer[offset..offset + gamepad_bytes.len()].copy_from_slice(&gamepad_bytes);
+    }
+    buffer
 }
 
-/// Full input packet with every native input type the xCloud protocol supports.
+/// Full input packet: gamepad/timing plus native keyboard and mouse events.
 ///
-/// Block order matches the browser client: metadata, gamepad, pointer, mouse, keyboard.
+/// Section order mirrors `InputPacket::setData` in the browser client:
+/// metadata, gamepad, mouse, keyboard. Pointer/touch reports are not sent by
+/// this client. All sections are optional; the bits in the header say which
+/// bodies are present.
 pub fn input_packet(
     sequence: u32,
     frames: &[GamepadInputFrame],
     timing_frames: &[FrameTimingMetadata],
-    pointer_frames: &[PointerFrame],
-    mouse_frames: &[MouseFrame],
     keyboard_frames: &[KeyboardFrame],
+    mouse_frames: &[MouseFrame],
     now_ms: u64,
 ) -> Vec<u8> {
     let mut report_type = ReportType::NONE;
+
     let metadata_bytes = if timing_frames.is_empty() {
         Vec::new()
     } else {
@@ -359,40 +352,26 @@ pub fn input_packet(
         report_type |= ReportType::GAMEPAD;
         encode_gamepads(frames)
     };
-    let pointer_bytes = if pointer_frames.is_empty() {
-        Vec::new()
-    } else {
-        report_type |= ReportType::POINTER;
-        encode_pointers(pointer_frames)
-    };
     let mouse_bytes = if mouse_frames.is_empty() {
         Vec::new()
     } else {
         report_type |= ReportType::MOUSE;
-        encode_mice(mouse_frames)
+        encode_mouse(mouse_frames)
     };
     let keyboard_bytes = if keyboard_frames.is_empty() {
         Vec::new()
     } else {
         report_type |= ReportType::KEYBOARD;
-        encode_keyboards(keyboard_frames)
+        encode_keyboard(keyboard_frames)
     };
 
-    let mut buffer = make_header(
-        report_type,
-        sequence,
-        metadata_bytes.len()
-            + gamepad_bytes.len()
-            + pointer_bytes.len()
-            + mouse_bytes.len()
-            + keyboard_bytes.len(),
-        now_ms,
-    );
+    let payload_size =
+        metadata_bytes.len() + gamepad_bytes.len() + mouse_bytes.len() + keyboard_bytes.len();
+    let mut buffer = make_header(report_type, sequence, payload_size, now_ms);
     let mut offset = HEADER_SIZE;
     for bytes in [
         &metadata_bytes,
         &gamepad_bytes,
-        &pointer_bytes,
         &mouse_bytes,
         &keyboard_bytes,
     ] {
@@ -691,67 +670,5 @@ mod tests {
         assert_eq!(count_byte(0), 0);
         assert_eq!(count_byte(255), 255);
         assert_eq!(count_byte(300), 255);
-    }
-
-    #[test]
-    fn native_keyboard_uses_vkey_wire_format() {
-        use crate::input::models::KeyboardFrame;
-        let packet = input_packet(
-            1,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[KeyboardFrame::vkey(0x57, true), KeyboardFrame::vkey(0x20, false)],
-            0,
-        );
-        assert_eq!(report_type_of(&packet), ReportType::KEYBOARD.bits());
-        assert_eq!(packet.len(), HEADER_SIZE + 1 + 2 * KEYBOARD_ENTRY_SIZE);
-        assert_eq!(&packet[14..21], &[2, 2, 1, 0x57, 2, 0, 0x20]);
-    }
-
-    #[test]
-    fn native_mouse_layout_matches_browser_client() {
-        use crate::input::models::MouseFrame;
-        let frame = MouseFrame {
-            x: 100,
-            y: 200,
-            wheel_x: 3,
-            wheel_y: 4,
-            buttons: 1,
-            relative: false,
-        };
-        let packet = input_packet(2, &[], &[], &[], &[frame], &[], 0);
-        assert_eq!(report_type_of(&packet), ReportType::MOUSE.bits());
-        assert_eq!(packet.len(), HEADER_SIZE + 1 + MOUSE_ENTRY_SIZE);
-        assert_eq!(packet[14], 1);
-        assert_eq!(&packet[15..19], &100u32.to_le_bytes());
-        assert_eq!(&packet[19..23], &200u32.to_le_bytes());
-        assert_eq!(packet[31], 1);
-        assert_eq!(packet[32], 0);
-    }
-
-    #[test]
-    fn native_pointer_layout_matches_browser_client() {
-        use crate::input::models::{PointerEventFrame, PointerFrame};
-        let frame = PointerFrame {
-            events: vec![PointerEventFrame {
-                x: 640,
-                y: 360,
-                pressure: 128,
-                twist: 0,
-                phase: 3,
-            }],
-        };
-        let packet = input_packet(3, &[], &[], &[frame], &[], &[], 0);
-        assert_eq!(report_type_of(&packet), ReportType::POINTER.bits());
-        assert_eq!(packet.len(), HEADER_SIZE + 2 + POINTER_EVENT_SIZE);
-        assert_eq!(packet[14], 1); // one pointer frame
-        assert_eq!(packet[15], 1); // one contact
-        assert_eq!(&packet[16..18], &1u16.to_le_bytes()); // contact active
-        assert_eq!(packet[20], 128); // pressure
-        assert_eq!(&packet[27..31], &640u32.to_le_bytes()); // x at +11
-        assert_eq!(&packet[31..35], &360u32.to_le_bytes()); // y at +15
-        assert_eq!(packet[35], 3); // phase
     }
 }

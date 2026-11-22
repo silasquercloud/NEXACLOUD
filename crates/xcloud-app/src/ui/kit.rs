@@ -3,7 +3,7 @@
 //!
 //! Every widget paints itself with the painter (no egui frames), reports an
 //! accessible role and name, shows a pointing-hand cursor when clickable, and draws
-//! the lime focus ring when it has keyboard focus.
+//! the violet focus ring when it has keyboard focus.
 
 use egui::{
     Align2, Color32, CornerRadius, FontId, Id, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui,
@@ -88,7 +88,7 @@ pub fn place_with<R>(
 /// Visual weight of a [`Button`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
-    /// Lime fill: the one action that matters (Play, Sign in).
+    /// Violet fill: the one action that matters (Play, Sign in).
     Primary,
     /// White fill, dark text: strong secondary emphasis.
     Light,

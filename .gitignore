@@ -14,11 +14,3 @@
 /user_data.json
 
 /fixtures/testsrc_1080p60.h264
-
-# Android local build
-/android/local.properties
-/android/.gradle/
-/android/app/build/
-
-# Windows local build output
-/dist-windows/

@@ -48,39 +48,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc;
-use xcloud_api::auth::{DeviceCodeInfo, MicrosoftAuthService, StreamTokens};
+use xcloud_api::auth::{
+    DEFAULT_POLL_MAX_WAIT_SECS, DeviceCodeInfo, MicrosoftAuthService, StreamTokens,
+};
 
 use crate::services::Services;
 use crate::state::{AuthState, Handle, Repaint, SessionCommand, SessionHandle, SessionSnapshot};
 
 const LOG: &str = "Session";
-/// Time the app waits for the browser redirect before giving up (10 minutes).
-const INTERACTIVE_LOGIN_TIMEOUT_SECS: u64 = 600;
-/// How many times a cold-start token refresh is retried before surfacing an error.
-const RESTORE_MAX_ATTEMPTS: u32 = 3;
-
-/// True only for a definitive "the saved refresh token is dead" response from
-/// Microsoft. Everything else (network errors, timeouts, 5xx, transient 401/403)
-/// is treated as temporary so we never throw away a good saved session because
-/// of a momentary outage — that was the cause of the "keeps logging me out" bug.
-fn is_permanent_auth_error(error: &xcloud_api::Error) -> bool {
-    // The token endpoints wrap non-200 responses in `Error::Auth("... HTTP 400:
-    // {body}")`, while lower layers surface `Error::Status`; handle both.
-    let text = match error {
-        xcloud_api::Error::Status { status, body } if *status == 400 => body.as_str(),
-        xcloud_api::Error::Auth(message) if message.contains("HTTP 400") => message.as_str(),
-        _ => return false,
-    };
-    text.contains("invalid_grant")
-        || text.contains("AADSTS70000")
-        || text.contains("AADSTS7000215")
-        || text.contains("AADSTS700082")
-}
 
 /// What `SessionController` signalled to `AppController`.
 #[derive(Debug, Clone, PartialEq)]
@@ -308,31 +287,7 @@ impl SessionController {
         self.set_busy(true);
         self.set_status("Signing in");
         self.set_state(AuthState::Unknown);
-        // Retry transient refresh failures with backoff. A flaky connection or a
-        // brief Microsoft 5xx must not sign the user out of a perfectly good
-        // saved session.
-        let mut result = None;
-        let mut permanent = false;
-        for attempt in 0..RESTORE_MAX_ATTEMPTS {
-            let attempt_result = self.auth.refresh_stream_tokens().await;
-            if attempt == 0 {
-                // Classify the first failure: a dead refresh token must stop the
-                // loop immediately (only one queued token response exists).
-                permanent = attempt_result
-                    .as_ref()
-                    .err()
-                    .is_some_and(is_permanent_auth_error);
-            }
-            result = Some(attempt_result);
-            if result.as_ref().is_some_and(|r| r.is_ok())
-                || permanent
-                || attempt + 1 == RESTORE_MAX_ATTEMPTS
-            {
-                break;
-            }
-            self.set_status("Signing in (retrying)");
-        }
-        let result = result.expect("restore loop always produces a result");
+        let result = self.auth.refresh_stream_tokens().await;
         self.set_busy(false);
         self.set_status("");
         match result {
@@ -343,66 +298,41 @@ impl SessionController {
             }
             Err(error) => {
                 tracing::warn!(target: LOG, "Session restore failed: {error}");
-                if permanent {
-                    // The refresh token is genuinely dead — only now clear it.
-                    if let Err(clear_error) = self.auth.clear_session() {
-                        tracing::warn!(target: LOG, "clearing the stale session failed: {clear_error}");
-                    }
-                    self.set_state(AuthState::Unauthenticated);
-                } else {
-                    // Keep the saved session. The user can retry with the sign-in
-                    // button or simply relaunch; the next cold start tries again.
-                    self.set_error(
-                        "Couldn't reach Microsoft right now. Your sign-in is saved on this device — try again.",
-                    );
-                    self.set_state(AuthState::Error);
+                if let Err(clear_error) = self.auth.clear_session() {
+                    tracing::warn!(target: LOG, "clearing the stale session failed: {clear_error}");
                 }
+                self.set_state(AuthState::Unauthenticated);
             }
         }
     }
 
-    /// Interactive browser sign-in: open the Microsoft page, receive the redirect on
-    /// localhost, redeem the code, then do the stream token exchange.
+    /// `SessionController::beginSignIn`: device code → poll → stream token exchange.
     async fn begin_sign_in(self: Arc<Self>) {
         self.set_phase(Phase::DeviceCode);
         self.set_error("");
         self.set_busy(true);
+        self.set_status("Contacting Microsoft");
 
-        let login = match self.auth.begin_interactive_login() {
-            Ok(login) => login,
+        let info = match self.auth.request_device_code().await {
+            Ok(info) => info,
             Err(error) => {
                 self.fail(&error.to_string());
                 return;
             }
         };
-        // The device-code view is really just "finish signing in in the browser" now;
-        // it auto-opens this URL on its first frame.
-        self.set_device_code(None);
-        self.update(|snapshot| {
-            snapshot.sign_in_url = login.url.clone();
-            true
-        });
+        self.set_device_code(Some(&info));
         self.set_state(AuthState::Authenticating);
-        self.set_status("Finish signing in in the browser — no code to type");
+        self.set_status("Waiting for you to finish signing in");
 
         self.set_phase(Phase::Polling);
-        let code = match self
+        // `pollForMsaToken(deviceCode, interval)` with the default 900 s cap; the service
+        // clamps the interval to at least one second like the C++ `qMax(1, ...)`.
+        let interval = u64::try_from(info.interval).unwrap_or(1);
+        let msa_token = match self
             .auth
-            .wait_for_interactive_code(
-                &login,
-                Duration::from_secs(INTERACTIVE_LOGIN_TIMEOUT_SECS),
-            )
+            .poll_for_msa_token(&info.device_code, interval, DEFAULT_POLL_MAX_WAIT_SECS)
             .await
         {
-            Ok(code) => code,
-            Err(error) => {
-                self.fail(&error.to_string());
-                return;
-            }
-        };
-
-        self.set_status("Finishing Microsoft sign-in");
-        let msa_token = match self.auth.exchange_auth_code(&login, &code).await {
             Ok(token) => token,
             Err(error) => {
                 self.fail(&error.to_string());
@@ -416,7 +346,6 @@ impl SessionController {
         self.set_phase(Phase::Idle);
         self.set_busy(false);
         self.set_status("");
-        self.set_device_code(None);
         match result {
             Ok(tokens) => {
                 self.set_tokens(tokens.clone());
@@ -450,15 +379,7 @@ impl SessionController {
     /// `m_tokens = ...; emit tokensChanged();` (the event itself is sent with the
     /// `authenticated` notification by the caller).
     fn set_tokens(&self, tokens: StreamTokens) {
-        let gamertag = tokens.gamertag.clone();
         *self.tokens.lock() = tokens;
-        self.update(|snapshot| {
-            if snapshot.gamertag == gamertag {
-                return false;
-            }
-            snapshot.gamertag = gamertag;
-            true
-        });
     }
 
     /// Queues an event for the app shell and asks for a frame so it is drained promptly
@@ -628,6 +549,20 @@ mod tests {
         harness_with_store(Arc::new(MemoryTokenStore::new()))
     }
 
+    /// Wait for the OS command-forwarding thread, which does not follow tokio's paused
+    /// clock. The snapshot may already be unauthenticated before a restore is processed.
+    async fn wait_for_tokens_restored(h: &Harness, expected: &StreamTokens) {
+        let events = h.events.clone();
+        let event =
+            tokio::task::spawn_blocking(move || events.recv_timeout(Duration::from_secs(5)))
+                .await
+                .unwrap();
+        assert_eq!(
+            event,
+            Ok(SessionEvent::TokensRestored(Box::new(expected.clone())))
+        );
+    }
+
     /// `RestoreSession` always reports the stored bundle first (`bootstrap` →
     /// `updateApiCredentials`).
     fn expect_tokens_restored(h: &Harness, expected: &StreamTokens) {
@@ -667,11 +602,6 @@ mod tests {
             if session.with(&predicate) {
                 return;
             }
-            // Commands cross a real OS thread (`forward_commands`) before reaching
-            // the tokio task. With `start_paused`, virtual-time sleeps can starve that
-            // thread, so yield to the OS as well as to the executor.
-            std::thread::yield_now();
-            tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         panic!(
@@ -686,20 +616,6 @@ mod tests {
             .iter()
             .filter(|request| request.url.contains(url_contains))
             .count()
-    }
-
-    /// A second `RestoreSession` crosses a real OS thread before reaching the
-    /// controller. Under `start_paused`, a fixed virtual-time sleep can elapse
-    /// before that thread delivers the command, so wait for the queued event.
-    async fn wait_for_event(h: &Harness) {
-        for _ in 0..2000 {
-            if !h.events.is_empty() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-            tokio::task::yield_now().await;
-        }
-        panic!("timed out waiting for a session event");
     }
 
     #[tokio::test(start_paused = true)]
@@ -803,26 +719,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn restore_transient_failure_keeps_the_saved_session() {
-        let store = Arc::new(MemoryTokenStore::new());
-        store.save_refresh_token("R1").unwrap();
-        let h = harness_with_store(store);
-        // A 5xx is a temporary outage, not a dead refresh token.
-        h.transport
-            .enqueue_json("oauth2/v2.0/token", r#"{"error":"temporarily_unavailable"}"#, 503);
-
-        h.session.send(SessionCommand::RestoreSession);
-        wait_until(&h.session, |s| s.state == AuthState::Error).await;
-
-        let snapshot = h.session.read();
-        assert!(!snapshot.is_busy);
-        assert!(!snapshot.last_error.is_empty());
-        // The whole point: do not log the user out because of a flaky service.
-        assert_eq!(h.store.load_refresh_token().unwrap(), "R1");
-    }
-
-    #[tokio::test(start_paused = true)]
-    #[ignore = "legacy device-code flow; sign-in is now interactive authorization-code + PKCE"]
     async fn full_device_code_flow_signs_in() {
         let h = harness();
         h.transport
@@ -893,7 +789,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[ignore = "legacy device-code flow; sign-in is now interactive authorization-code + PKCE"]
     async fn cancel_mid_poll_returns_to_unauthenticated() {
         let h = harness();
         h.transport
@@ -944,7 +839,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[ignore = "legacy device-code flow; sign-in is now interactive authorization-code + PKCE"]
     async fn cancel_during_the_exchange_still_signs_in_like_the_cpp() {
         let h = harness();
         h.transport
@@ -986,7 +880,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[ignore = "legacy device-code flow; sign-in is now interactive authorization-code + PKCE"]
     async fn device_code_request_failure_enters_error_state() {
         let h = harness();
         h.transport.enqueue_error("devicecode", "dns");
@@ -1030,7 +923,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[ignore = "legacy device-code flow; sign-in is now interactive authorization-code + PKCE"]
     async fn exchange_failure_enters_error_state() {
         let h = harness();
         h.transport
@@ -1085,10 +977,9 @@ mod tests {
         let request_count = h.transport.request_count();
         // Restoring now finds nothing.
         h.session.send(SessionCommand::RestoreSession);
-        wait_for_event(&h).await;
+        wait_for_tokens_restored(&h, &StreamTokens::default()).await;
         assert_eq!(h.session.read().state, AuthState::Unauthenticated);
         assert_eq!(h.transport.request_count(), request_count);
-        expect_tokens_restored(&h, &StreamTokens::default());
         assert!(h.events.try_recv().is_err());
     }
 
@@ -1115,8 +1006,7 @@ mod tests {
         };
         h.store.save_stream_tokens(&replaced).unwrap();
         h.session.send(SessionCommand::RestoreSession);
-        wait_for_event(&h).await;
-        expect_tokens_restored(&h, &stored_tokens());
+        wait_for_tokens_restored(&h, &stored_tokens()).await;
         assert!(h.events.try_recv().is_err());
     }
 

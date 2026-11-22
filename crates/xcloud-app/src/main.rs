@@ -1,4 +1,4 @@
-//! OpenXCloud application entry point.
+//! NexaCloud application entry point.
 //!
 //! * `Logging::openLogFile()` → [`init_logging`]: `tracing-subscriber` with `RUST_LOG` to
 //!   stderr and to `openxcloud.log` under the data directory. Like the Qt logger
@@ -16,6 +16,12 @@
 //! On exit the app stops the stream, joins the stream host and drops its transport.
 //! The runtime is then shut down with a timeout so stray
 //! keepalive tasks cannot keep the process alive.
+//!
+//! Windows release builds use the GUI subsystem (no console window next to the app) and
+//! attach to the parent console when started from a terminal, so `--help`, `--smoke`
+//! and the stderr log still show there.
+
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -53,7 +59,7 @@ fn default_env_filter() -> EnvFilter {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "openxcloud", version = APP_VERSION, about = "OpenXCloud: Xbox Cloud Gaming for the desktop")]
+#[command(name = "nexacloud", version = APP_VERSION, about = "NexaCloud: Xbox Cloud Gaming for the desktop")]
 struct Cli {
     /// Open a window, instantiate every screen for a few frames on detached snapshots,
     /// print `smoke: N failure(s)` and exit with 0 (none) or 1.
@@ -70,6 +76,8 @@ enum PresentArg {
     Fifo,
     /// Lowest latency; tearing is acceptable in a game stream.
     Immediate,
+    /// VSync off / mailbox when available.
+    Off,
 }
 
 impl From<PresentArg> for wgpu::PresentMode {
@@ -77,14 +85,23 @@ impl From<PresentArg> for wgpu::PresentMode {
         match arg {
             PresentArg::Fifo => wgpu::PresentMode::Fifo,
             PresentArg::Immediate => wgpu::PresentMode::Immediate,
+            PresentArg::Off => wgpu::PresentMode::Mailbox,
         }
     }
 }
 
 fn main() -> ExitCode {
+    #[cfg(all(windows, not(debug_assertions)))]
+    // SAFETY: plain Win32 call; fails harmlessly when there is no parent console
+    // (Explorer, Start menu) or the process already has one.
+    unsafe {
+        let _ = windows::Win32::System::Console::AttachConsole(
+            windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
+    }
     let cli = Cli::parse();
     let log_path = init_logging();
-    tracing::info!(target: LOG, "OpenXCloud {APP_VERSION} starting");
+    tracing::info!(target: LOG, "NexaCloud {APP_VERSION} starting");
     if let Some(path) = &log_path {
         tracing::info!(target: LOG, "log file {}", path.display());
     }
@@ -171,10 +188,7 @@ fn open_log_file() -> Option<(File, PathBuf)> {
 /// `xcloud-gpu` can use when the adapter has it (`TIMESTAMP_QUERY` for the HUD timings).
 fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
     let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
-        // Mesa/GL nesta máquina (Intel HD 3000) reporta limites reais, enquanto
-        // downlevel_webgl2_defaults() zera max_storage_textures_per_shader_stage.
-        // O pipeline video.nv12_to_rgba precisa de 1 storage texture em COMPUTE.
-        adapter.limits()
+        wgpu::Limits::downlevel_webgl2_defaults()
     } else {
         wgpu::Limits::default()
     };
@@ -191,11 +205,43 @@ fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static>
     }
 }
 
+/// Adapter order for the VSR adapter selector (lower first): the GPU type the power
+/// preference asks for (discrete for high performance, integrated for low power), then
+/// DX12 before other backends of the same GPU.
+fn adapter_rank(info: &wgpu::AdapterInfo, low_power: bool) -> (u8, bool) {
+    let kind = match (info.device_type, low_power) {
+        (wgpu::DeviceType::DiscreteGpu, false) | (wgpu::DeviceType::IntegratedGpu, true) => 0,
+        (wgpu::DeviceType::IntegratedGpu, false) | (wgpu::DeviceType::DiscreteGpu, true) => 1,
+        (wgpu::DeviceType::VirtualGpu, _) => 2,
+        (wgpu::DeviceType::Other, _) => 3,
+        (wgpu::DeviceType::Cpu, _) => 4,
+    };
+    (kind, info.backend != wgpu::Backend::Dx12)
+}
+
 /// `ApplicationWindow { width: 1360; height: 900; minimumWidth: 900; minimumHeight: 560 }`
 /// with the wgpu renderer and the chosen present mode.
 fn native_options(present_mode: wgpu::PresentMode) -> eframe::NativeOptions {
     let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.device_descriptor = Arc::new(device_descriptor);
+    // Video super resolution shares its output with wgpu's D3D12 device, so a VSR build
+    // prefers the DX12 adapter of the GPU it would pick anyway; Vulkan/GL stay available
+    // as a fallback, and `WGPU_BACKEND` still narrows the choice.
+    if cfg!(windows) && xcloud_gpu::vsr::COMPILED {
+        let low_power = setup.power_preference == wgpu::PowerPreference::LowPower;
+        setup.native_adapter_selector = Some(Arc::new(move |adapters, surface| {
+            adapters
+                .iter()
+                .filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)))
+                .min_by_key(|a| adapter_rank(&a.get_info(), low_power))
+                .inspect(|a| {
+                    let info = a.get_info();
+                    tracing::info!(target: LOG, "wgpu adapter {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+                })
+                .cloned()
+                .ok_or_else(|| "no wgpu adapter can present to this window".to_owned())
+        }));
+    }
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(WINDOW_TITLE)
@@ -250,7 +296,7 @@ fn run_smoke(options: eframe::NativeOptions) -> ExitCode {
     let outcome: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     let shared = Arc::clone(&outcome);
     let result = eframe::run_native(
-        "OpenXCloud smoke",
+        "NexaCloud smoke",
         options,
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
@@ -308,6 +354,31 @@ impl eframe::App for SmokeApp {
 mod tests {
     use super::*;
     use tracing::Level;
+
+    #[test]
+    fn adapter_rank_prefers_the_requested_gpu_then_dx12() {
+        use wgpu::{AdapterInfo, Backend, DeviceType};
+        let rank = |ty, backend, low_power| adapter_rank(&AdapterInfo::new(ty, backend), low_power);
+        let discrete_dx12 = rank(DeviceType::DiscreteGpu, Backend::Dx12, false);
+        let discrete_vk = rank(DeviceType::DiscreteGpu, Backend::Vulkan, false);
+        let integrated_dx12 = rank(DeviceType::IntegratedGpu, Backend::Dx12, false);
+        let warp = rank(DeviceType::Cpu, Backend::Dx12, false);
+        assert!(discrete_dx12 < discrete_vk);
+        assert!(
+            discrete_vk < integrated_dx12,
+            "GPU type outranks the backend"
+        );
+        assert!(integrated_dx12 < warp);
+        // Low power flips discrete and integrated, DX12 still first within one GPU.
+        assert!(
+            rank(DeviceType::IntegratedGpu, Backend::Vulkan, true)
+                < rank(DeviceType::DiscreteGpu, Backend::Dx12, true)
+        );
+        assert!(
+            rank(DeviceType::IntegratedGpu, Backend::Dx12, true)
+                < rank(DeviceType::IntegratedGpu, Backend::Vulkan, true)
+        );
+    }
 
     /// App diagnostics stay at debug while dependencies use quieter defaults.
     #[test]
@@ -384,7 +455,7 @@ mod tests {
             options.viewport.min_inner_size,
             Some(egui::vec2(900.0, 560.0))
         );
-        assert_eq!(options.viewport.title.as_deref(), Some("OpenXCloud"));
+        assert_eq!(options.viewport.title.as_deref(), Some("NexaCloud"));
         assert_eq!(
             options.wgpu_options.surface.present_mode,
             wgpu::PresentMode::Fifo

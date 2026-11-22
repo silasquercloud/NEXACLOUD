@@ -202,7 +202,7 @@ impl StreamHud {
     ) -> Option<Rect> {
         let now = ui.input(|i| i.time);
         self.history.borrow_mut().sample(now, s);
-        if !Self::visible(s) {
+        if !s.connected() {
             return None;
         }
         self.show_details(ui, area, s);
@@ -618,9 +618,8 @@ mod tests {
 
         let stream = StreamHandle::detached(sample());
         let hud = StreamHud::new(stream);
-        // The CI/test font set may not carry `→`; layout and label are what matter.
+        // No `allow_missing_glyphs`: the test also proves the UI font has `→`.
         let mut harness = Harness::builder()
-            .allow_missing_glyphs()
             .with_size(egui::vec2(1600.0, 700.0))
             .with_context_setup(theme::apply)
             .build_ui(|ui| {
@@ -665,7 +664,6 @@ mod tests {
         s.decode_stats.decode_errors = 7;
         let hud = StreamHud::new(StreamHandle::detached(s));
         let mut harness = Harness::builder()
-            .allow_missing_glyphs()
             .with_size(egui::vec2(650.0, 750.0))
             .with_context_setup(theme::apply)
             .build_ui(|ui| {

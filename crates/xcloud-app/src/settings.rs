@@ -50,16 +50,19 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 /// `Settings::resolutionProfile` values the panel offers (`StreamResolutionMode`).
 pub const RESOLUTION_PROFILES: [&str; 5] = ["auto", "720p", "1080p", "1440p", "1080pHQ"];
 /// `Settings::preferredFrameRate` values the panel offers.
-pub const FRAME_RATES: [i32; 2] = [30, 60];
+pub const FRAME_RATES: [i32; 4] = [30, 60, 120, 240];
 /// `AppSettings::present_mode` values: lowest latency first.
-pub const PRESENT_MODES: [&str; 2] = ["immediate", "fifo"];
+pub const PRESENT_MODES: [&str; 3] = ["immediate", "fifo", "off"];
 /// `AppSettings::upscaler` values (`xcloud_gpu::Upscaler::as_str`): FSR 1.0 (default) and
-/// MetalFX (macOS with `--features metalfx`; the renderer falls back to FSR otherwise).
-pub const UPSCALERS: [&str; 2] = ["fsr", "metalfx"];
+/// MetalFX (macOS with `--features metalfx`) and driver video super resolution (Windows with
+/// `--features vsr`); the renderer falls back to FSR when the chosen one is unavailable.
+pub const UPSCALERS: [&str; 3] = ["fsr", "metalfx", "vsr"];
 
 /// Accessible labels of the panel's widgets (what the tests query).
 pub const LABEL_RESOLUTION: &str = "Resolution profile";
 pub const LABEL_FRAME_RATE: &str = "Frame rate";
+pub const LABEL_VSYNC: &str = "VSync";
+pub const LABEL_VSYNC_DESC: &str = "Desliga VSync para menor latencia (pode causar tearing).";
 pub const LABEL_REGION: &str = "Preferred region";
 pub const LABEL_IPV6: &str = "Prefer IPv6";
 pub const LABEL_DEADZONE: &str = "Stick deadzone";
@@ -71,6 +74,8 @@ pub const LABEL_PRESENT: &str = "Present mode";
 pub const LABEL_UPSCALE: &str = "Upscaler";
 pub const LABEL_UPSCALER_KIND: &str = "Upscaling method";
 pub const LABEL_SHARPNESS: &str = "Sharpness";
+pub const LABEL_HARDWARE_DECODE: &str = "Hardware decoding";
+pub const LABEL_LICENSED_ONLY: &str = "Only games I can play";
 
 // ----------------------------------------------------------------------------- paths
 
@@ -99,6 +104,7 @@ struct SettingsFile {
     stream: StreamGroup,
     input: InputGroup,
     render: RenderGroup,
+    library: LibraryGroup,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -138,6 +144,8 @@ struct InputGroup {
     trigger_sensitivity: Option<f64>,
     /// `input/vibrationIntensity`.
     vibration_intensity: Option<f64>,
+    /// `input/nativeMkb` (new): send native keyboard/mouse reports.
+    native_mkb: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -152,6 +160,21 @@ struct RenderGroup {
     sharpness: Option<f32>,
     /// `render/upscaler` (new): one of [`UPSCALERS`].
     upscaler: Option<String>,
+    /// `render/hardwareDecode` (new).
+    hardware_decode: Option<bool>,
+    /// `render/stretchVideo`.
+    stretch_video: Option<bool>,
+    /// `render/videoZoom`.
+    video_zoom: Option<f32>,
+    /// `render/showStats`.
+    show_stats: Option<bool>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct LibraryGroup {
+    /// `library/licensedOnly` (new).
+    licensed_only: Option<bool>,
 }
 
 impl SettingsFile {
@@ -173,6 +196,7 @@ impl SettingsFile {
                 swap_ab: Some(s.swap_ab),
                 trigger_sensitivity: Some(s.trigger_sensitivity),
                 vibration_intensity: Some(s.vibration_intensity),
+                native_mkb: Some(s.native_mkb),
             },
             render: RenderGroup {
                 present_mode: Some(s.present_mode.clone()),
@@ -180,6 +204,13 @@ impl SettingsFile {
                 upscale_height: Some(normalize_upscale_height(s.upscale_height)),
                 sharpness: Some(s.sharpness),
                 upscaler: Some(s.upscaler.clone()),
+                hardware_decode: Some(s.hardware_decode),
+                stretch_video: Some(s.stretch_video),
+                video_zoom: Some(s.video_zoom),
+                show_stats: Some(s.show_stats),
+            },
+            library: LibraryGroup {
+                licensed_only: Some(s.licensed_only),
             },
         }
     }
@@ -223,6 +254,12 @@ impl SettingsFile {
             ),
             sharpness: self.render.sharpness.unwrap_or(d.sharpness),
             upscaler: normalize_upscaler(self.render.upscaler.as_deref().unwrap_or(&d.upscaler)),
+            hardware_decode: self.render.hardware_decode.unwrap_or(d.hardware_decode),
+            licensed_only: self.library.licensed_only.unwrap_or(d.licensed_only),
+            native_mkb: self.input.native_mkb.unwrap_or(d.native_mkb),
+            stretch_video: self.render.stretch_video.unwrap_or(d.stretch_video),
+            video_zoom: self.render.video_zoom.unwrap_or(d.video_zoom).clamp(0.5, 3.0),
+            show_stats: self.render.show_stats.unwrap_or(d.show_stats),
         }
     }
 }
@@ -283,10 +320,10 @@ pub fn normalize_profile(profile: &str) -> String {
 /// default (`immediate`).
 pub fn normalize_present_mode(name: &str) -> String {
     match name.trim().to_ascii_lowercase().as_str() {
-        "fifo" | "vsync" => "fifo",
-        _ => "immediate",
+        "fifo" | "vsync" => "fifo".to_owned(),
+        "off" | "novsync" | "no_vsync" | "mailbox" => "off".to_owned(),
+        _ => "immediate".to_owned(),
     }
-    .to_owned()
 }
 
 /// Supported output targets; preserve the historical 4K default for unknown values.
@@ -298,11 +335,13 @@ pub fn normalize_upscale_height(height: u32) -> u32 {
 }
 
 /// `AppSettings::upscaler` → one of [`UPSCALERS`]. Accepts what `xcloud_gpu::Upscaler::parse`
-/// accepts for the two (`fsr`, `fsr1`, `metalfx`, `metal-fx`, `fx`), case-insensitively;
+/// accepts for the three (`fsr`, `fsr1`, `metalfx`, `metal-fx`, `fx`, `vsr`, `rtx`, `rtx-vsr`),
+/// case-insensitively;
 /// anything else (including `bypass`, which is `upscale_enabled = false` here) becomes `fsr`.
 pub fn normalize_upscaler(name: &str) -> String {
     match name.trim().to_ascii_lowercase().as_str() {
         "metalfx" | "metal-fx" | "fx" => "metalfx",
+        "vsr" | "rtx" | "rtx-vsr" => "vsr",
         _ => "fsr",
     }
     .to_owned()
@@ -313,6 +352,7 @@ pub fn present_mode_from_name(name: &str) -> Option<wgpu::PresentMode> {
     match name.trim().to_ascii_lowercase().as_str() {
         "fifo" | "vsync" => Some(wgpu::PresentMode::Fifo),
         "immediate" => Some(wgpu::PresentMode::Immediate),
+        "off" | "novsync" | "no_vsync" | "mailbox" => Some(wgpu::PresentMode::Mailbox),
         _ => None,
     }
 }
@@ -504,6 +544,8 @@ mod tests {
             upscale_height: 1440,
             sharpness: 1.5,
             upscaler: "metalfx".into(),
+            hardware_decode: true,
+            licensed_only: true,
         };
         let parsed = from_json(&to_json(&settings)).expect("valid json");
         assert_eq!(parsed, settings);
@@ -529,6 +571,8 @@ mod tests {
         assert_eq!(normalize_upscaler("MetalFX"), "metalfx");
         assert_eq!(normalize_upscaler(" fx "), "metalfx");
         assert_eq!(normalize_upscaler("fsr"), "fsr");
+        assert_eq!(normalize_upscaler("RTX"), "vsr");
+        assert_eq!(normalize_upscaler(" vsr "), "vsr");
         assert_eq!(
             normalize_upscaler("bypass"),
             "fsr",
@@ -598,8 +642,9 @@ mod tests {
             present_mode_from_name("Immediate"),
             Some(wgpu::PresentMode::Immediate)
         );
-        assert_eq!(present_mode_from_name("mailbox"), None);
+        assert_eq!(present_mode_from_name("mailbox"), Some(wgpu::PresentMode::Mailbox));
         assert_eq!(normalize_present_mode("FIFO"), "fifo");
+        assert_eq!(normalize_present_mode("off"), "off");
         assert_eq!(normalize_present_mode("whatever"), "immediate");
     }
 

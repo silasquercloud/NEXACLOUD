@@ -66,7 +66,7 @@ use crate::user_data::{self, UserData, UserDataHandle, UserDataStore};
 const LOG: &str = "App";
 
 /// `ApplicationWindow.title`.
-pub const WINDOW_TITLE: &str = "OpenXCloud";
+pub const WINDOW_TITLE: &str = "NexaCloud";
 /// `width: 1360; height: 900`.
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1360.0, 900.0];
 /// `minimumWidth: 900; minimumHeight: 560`.
@@ -122,7 +122,7 @@ pub fn play_command(card: &LibraryCard) -> StreamCommand {
 
 // ----------------------------------------------------------------------------- app
 
-/// The OpenXCloud window: Main.qml as an `eframe::App`.
+/// The NexaCloud window: Main.qml as an `eframe::App`.
 pub struct App {
     controllers: Controllers,
     /// `None` on a detached shell (smoke run, tests).
@@ -181,6 +181,9 @@ impl App {
         let (library, library_snapshot, library_commands) = Handle::new(LibrarySnapshot::default());
         // Store text in the user's language (queued before the first refresh).
         library.send(LibraryCommand::SetLocale(settings.read().locale.clone()));
+        library.send(LibraryCommand::SetLicensedOnly(
+            settings.read().licensed_only,
+        ));
         LibraryController::new(
             Arc::clone(&services.api),
             Some(Arc::clone(&services.catalog)),
@@ -205,7 +208,7 @@ impl App {
                 api: Some(Arc::clone(&services.api)),
                 settings: Arc::clone(&settings),
                 repaint,
-                decoder: default_decoder_factory(),
+                decoder: default_decoder_factory(settings.read().hardware_decode),
                 audio: AudioOutput::new(),
                 gamepad: native_gamepad_factory(),
             },
@@ -253,7 +256,7 @@ impl App {
         }
         tracing::info!(
             target: LOG,
-            "OpenXCloud {} ready streamingAvailable={}",
+            "NexaCloud {} ready streamingAvailable={}",
             app.controllers.app_version,
             app.controllers.streaming_available
         );
@@ -431,12 +434,23 @@ impl App {
     /// A settings-panel change: publish it, re-apply the live settings
     /// (`StreamController::applySettings` / `refreshPreferences`) and save.
     fn apply_settings(&mut self, settings: AppSettings) {
-        let locale_changed = self.controllers.settings.read().locale != settings.locale;
+        let (locale_changed, licensed_only_changed) = {
+            let current = self.controllers.settings.read();
+            (
+                current.locale != settings.locale,
+                current.licensed_only != settings.licensed_only,
+            )
+        };
         *self.controllers.settings.write() = settings.clone();
         if locale_changed {
             self.controllers
                 .library
                 .send(LibraryCommand::SetLocale(settings.locale.clone()));
+        }
+        if licensed_only_changed {
+            self.controllers
+                .library
+                .send(LibraryCommand::SetLicensedOnly(settings.licensed_only));
         }
         if let Some(services) = &self.services {
             services.apply_preferences(&settings);
@@ -1068,7 +1082,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "legacy device-code flow; sign-in is now interactive authorization-code + PKCE"]
     fn authenticating_shows_device_code() {
         let (fixture, mut app) = detached(AuthState::Authenticating);
         fixture.session.write().user_code = "ABCD-EFGH".into();

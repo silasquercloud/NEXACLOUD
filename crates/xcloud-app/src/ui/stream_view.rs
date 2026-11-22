@@ -45,7 +45,6 @@ use crate::state::{
     AppSettings, StreamCommand, StreamHandle, StreamSnapshot, TriggerSide, VideoSource,
 };
 use crate::theme;
-use crate::ui::vkey::egui_key_to_vkey;
 
 const LOG: &str = "Video";
 
@@ -212,6 +211,16 @@ impl CallbackTrait for VideoCallback {
     }
 }
 
+fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(s) => *s,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(s) => (*s).to_owned(),
+            Err(_) => "unknown panic".to_owned(),
+        },
+    }
+}
+
 /// The wgpu side of the stream view: owns the egui texture binding and keeps the
 /// [`VideoRenderer`] in egui's `callback_resources` (so it is created on eframe's device).
 /// Build it from `eframe::CreationContext::wgpu_render_state` /
@@ -239,6 +248,32 @@ impl GpuVideo {
     /// environment (`OPENXCLOUD_DISABLE_UPSCALE`, `OPENXCLOUD_UPSCALER`) and `settings`, and registers
     /// it with egui.
     pub fn new(render_state: &egui_wgpu::RenderState, settings: &AppSettings) -> Self {
+        Self::try_new(render_state, settings).unwrap_or_else(|e| {
+            warn!(target: LOG, "GPU video renderer unavailable ({e}); using CPU video path");
+            let health = GpuHealth::default();
+            // Force immediate CPU fallback.
+            health.record_failure();
+            for _ in 1..GPU_FALLBACK_AFTER_FAILURES {
+                health.record_failure();
+            }
+            Self {
+                render_state: render_state.clone(),
+                texture: VideoTexture::new(),
+                upscale_enabled: settings.upscale_enabled,
+                upscale_height: crate::settings::normalize_upscale_height(settings.upscale_height),
+                sharpness: settings.sharpness,
+                upscaler: Upscaler::default(),
+                env_upscaler: Upscaler::requested_from_env(),
+                health: Arc::new(health),
+                retired: Vec::new(),
+            }
+        })
+    }
+
+    pub fn try_new(
+        render_state: &egui_wgpu::RenderState,
+        settings: &AppSettings,
+    ) -> Result<Self, String> {
         let mut this = Self {
             render_state: render_state.clone(),
             texture: VideoTexture::new(),
@@ -250,8 +285,13 @@ impl GpuVideo {
             health: Arc::new(GpuHealth::default()),
             retired: Vec::new(),
         };
-        this.install_renderer(settings);
-        this
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.install_renderer(settings);
+        }));
+        match panicked {
+            Ok(()) => Ok(this),
+            Err(payload) => Err(panic_payload(payload)),
+        }
     }
 
     fn policy(settings: &AppSettings) -> UpscalePolicy {
@@ -301,7 +341,10 @@ impl GpuVideo {
 
     /// Parks a replaced renderer until its in-flight frames are done (see
     /// [`GpuVideo::after_submit`]). Nothing to wait for: dropped right away.
-    fn retire(&mut self, old: VideoRenderer) {
+    fn retire(&mut self, mut old: VideoRenderer) {
+        // The NVIDIA driver super-resolves one video processor at a time: free the old
+        // one before the new renderer creates (and checks) its own.
+        old.release_vsr();
         if old.in_flight() == 0 {
             return;
         }
@@ -431,10 +474,11 @@ impl GpuVideo {
         )
     }
 
-    /// Draws the latest output letterboxed into `available`.
-    fn draw(&self, painter: &egui::Painter, available: Rect, output: VideoOutput) -> Rect {
-        self.texture
-            .draw(painter, available, output.width, output.height)
+    /// Draws the latest output into `available`.
+    fn draw(&self, painter: &egui::Painter, available: Rect, output: VideoOutput, settings: &AppSettings) -> Rect {
+        let rect = video_display_rect(available, output.width, output.height, settings);
+        self.texture.draw_rect(painter, rect);
+        rect
     }
 
     /// Frames whose GPU work failed so far.
@@ -639,9 +683,9 @@ impl CpuVideo {
         })
     }
 
-    /// Draws the uploaded frame letterboxed into `available`.
-    fn draw(&self, painter: &egui::Painter, available: Rect, output: VideoOutput) -> Rect {
-        let rect = xcloud_gpu::letterbox(available, output.width, output.height);
+    /// Draws the uploaded frame into `available`.
+    fn draw(&self, painter: &egui::Painter, available: Rect, output: VideoOutput, settings: &AppSettings) -> Rect {
+        let rect = video_display_rect(available, output.width, output.height, settings);
         if let Some(texture) = &self.texture {
             painter.image(
                 texture.id(),
@@ -657,6 +701,20 @@ impl CpuVideo {
     fn release(&mut self) {
         self.texture = None;
         self.pixels = Vec::new();
+    }
+}
+
+fn video_display_rect(area: Rect, width: u32, height: u32, settings: &AppSettings) -> Rect {
+    let rect = if settings.stretch_video {
+        area
+    } else {
+        xcloud_gpu::letterbox(area, width, height)
+    };
+    let zoom = settings.video_zoom.clamp(0.5, 3.0);
+    if (zoom - 1.0).abs() < f32::EPSILON {
+        rect
+    } else {
+        Rect::from_center_size(rect.center(), rect.size() * zoom)
     }
 }
 
@@ -708,53 +766,121 @@ struct KeyEvent {
     pressed: bool,
 }
 
-/// Local hotkeys pulled out of egui before any game input is forwarded.
-/// F1 toggles the in-game menu; Escape closes it.
-#[derive(Debug, Clone, Copy, Default)]
-struct MenuKeys {
-    f1: bool,
-    escape: bool,
+/// Windows Virtual-Key code for an egui key, as expected by the xCloud
+/// `KEYBOARD` input report. Keys egui names by logical symbol map to their
+/// US-layout VK; physical left/right modifiers map to the shared VK.
+fn native_vkey(key: Key) -> Option<u8> {
+    use Key::*;
+    Some(match key {
+        ArrowDown => 0x28,
+        ArrowLeft => 0x25,
+        ArrowRight => 0x27,
+        ArrowUp => 0x26,
+        Escape => 0x1B,
+        Tab => 0x09,
+        Backspace => 0x08,
+        Enter => 0x0D,
+        Space => 0x20,
+        Insert => 0x2D,
+        Delete => 0x2E,
+        Home => 0x24,
+        End => 0x23,
+        PageUp => 0x21,
+        PageDown => 0x22,
+        Copy => 0x43,
+        Cut => 0x58,
+        Paste => 0x56,
+        Colon => 0xBA,
+        Comma => 0xBC,
+        Backslash => 0xDC,
+        Slash => 0xBF,
+        Pipe => 0xDC,
+        Questionmark => 0xBF,
+        Exclamationmark => 0x31,
+        OpenBracket => 0xDB,
+        CloseBracket => 0xDD,
+        OpenCurlyBracket => 0xDB,
+        CloseCurlyBracket => 0xDD,
+        Backtick => 0xC0,
+        Minus => 0xBD,
+        Period => 0xBE,
+        Plus => 0xBB,
+        Equals => 0xBB,
+        Semicolon => 0xBA,
+        Quote => 0xDE,
+        Num0 => 0x30,
+        Num1 => 0x31,
+        Num2 => 0x32,
+        Num3 => 0x33,
+        Num4 => 0x34,
+        Num5 => 0x35,
+        Num6 => 0x36,
+        Num7 => 0x37,
+        Num8 => 0x38,
+        Num9 => 0x39,
+        A => 0x41,
+        B => 0x42,
+        C => 0x43,
+        D => 0x44,
+        E => 0x45,
+        F => 0x46,
+        G => 0x47,
+        H => 0x48,
+        I => 0x49,
+        J => 0x4A,
+        K => 0x4B,
+        L => 0x4C,
+        M => 0x4D,
+        N => 0x4E,
+        O => 0x4F,
+        P => 0x50,
+        Q => 0x51,
+        R => 0x52,
+        S => 0x53,
+        T => 0x54,
+        U => 0x55,
+        V => 0x56,
+        W => 0x57,
+        X => 0x58,
+        Y => 0x59,
+        Z => 0x5A,
+        F1 => 0x70,
+        F2 => 0x71,
+        F3 => 0x72,
+        F4 => 0x73,
+        F5 => 0x74,
+        F6 => 0x75,
+        F7 => 0x76,
+        F8 => 0x77,
+        F9 => 0x78,
+        F10 => 0x79,
+        F11 => 0x7A,
+        F12 => 0x7B,
+        F13 => 0x7C,
+        F14 => 0x7D,
+        F15 => 0x7E,
+        F16 => 0x7F,
+        F17 => 0x80,
+        F18 => 0x81,
+        F19 => 0x82,
+        F20 => 0x83,
+        F21 => 0x84,
+        F22 => 0x85,
+        F23 => 0x86,
+        F24 => 0x87,
+        ShiftLeft | ShiftRight => 0x10,
+        ControlLeft | ControlRight => 0x11,
+        AltLeft | AltRight => 0x12,
+        SuperLeft | SuperRight => 0x5B,
+        CapsLock => 0x14,
+        NumLock => 0x90,
+        _ => return None,
+    })
 }
 
-fn take_menu_keys(input: &mut egui::InputState, menu_open: bool) -> MenuKeys {
-    let mut keys = MenuKeys::default();
-    input.events.retain(|event| {
-        if let egui::Event::Key {
-            key, pressed, repeat, ..
-        } = event
-        {
-            if *pressed && !*repeat {
-                match key {
-                    Key::F1 => {
-                        keys.f1 = true;
-                        return false;
-                    }
-                    // Escape is a normal game key unless the menu is open.
-                    Key::Escape if menu_open => {
-                        keys.escape = true;
-                        return false;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        true
-    });
-    keys
-}
-
-/// A native keyboard event: the Windows VKey code and whether it went down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NativeKeyEvent {
-    vkey: u8,
-    pressed: bool,
-}
-
-/// Pulls **all** mappable keys out of egui's input as native VKey events (xCloud
-/// `KEYBOARD` reports). This is used when native keyboard input is enabled, so
-/// every game key (WASD, F1-F12, digits, punctuation, modifiers, ...) reaches the
-/// cloud PC instead of only the virtual-controller subset.
-fn take_native_key_events(input: &mut egui::InputState) -> Vec<NativeKeyEvent> {
+/// Takes every key press/release from egui's input for native MKB mode, so
+/// egui does not act on game keys (Tab navigation, Space activating a widget, …).
+fn take_all_key_events(input: &mut egui::InputState) -> Vec<(Key, bool)> {
     let mut taken = Vec::new();
     input.events.retain(|event| {
         let egui::Event::Key {
@@ -767,17 +893,13 @@ fn take_native_key_events(input: &mut egui::InputState) -> Vec<NativeKeyEvent> {
         else {
             return true;
         };
-        let vkey = egui_key_to_vkey(*key).or_else(|| physical_key.and_then(egui_key_to_vkey));
-        let Some(vkey) = vkey else {
-            // Unmappable keys (media/IME) stay in egui's input.
-            return true;
-        };
-        if !(*pressed && *repeat) {
-            taken.push(NativeKeyEvent {
-                vkey,
-                pressed: *pressed,
-            });
+        if *repeat {
+            return false;
         }
+        // VK codes describe physical keys; `physical_key` is layout-independent
+        // (US positions), which is what the browser client reports. Fall back to
+        // the logical key for integrations that do not supply it.
+        taken.push((physical_key.unwrap_or(*key), *pressed));
         false
     });
     taken
@@ -846,6 +968,12 @@ pub struct StreamView {
     was_connected: bool,
     /// `root.pressedKeys`: held WASD keys, by QML name.
     pressed_keys: BTreeSet<&'static str>,
+    /// Last reported native mouse button bitmask (`PointerEvent.buttons`).
+    mouse_buttons: u8,
+    /// Whether the window currently holds a locked pointer for native MKB.
+    pointer_locked: bool,
+    /// Quick in-game menu (F1).
+    quick_menu: bool,
     /// `root.inputFocused` as last reported; `None` before the first frame
     /// (`Component.onCompleted` has not run yet).
     input_focused: Option<bool>,
@@ -854,15 +982,6 @@ pub struct StreamView {
     last_frame: Option<(usize, Instant)>,
     last_output: Option<VideoOutput>,
     last_report: Option<OutputReport>,
-    /// Last native mouse position (server pixels) + button bitmask sent, to avoid flooding.
-    last_mouse: (u32, u32, u8),
-    /// In-game overlay menu, toggled with F1 (never forwarded to the cloud PC).
-    menu_open: bool,
-    /// Wall-clock instant the current cloud session connected (for the session timer).
-    session_start: Option<Instant>,
-    /// Whether native keyboard/mouse input is active (vs. the virtual gamepad fallback).
-    /// Sent to the input worker on connect; toggleable from the in-game menu.
-    native_input: bool,
 }
 
 impl StreamView {
@@ -884,25 +1003,14 @@ impl StreamView {
             controls_since: 0.0,
             was_connected: false,
             pressed_keys: BTreeSet::new(),
+            mouse_buttons: 0,
+            pointer_locked: false,
+            quick_menu: false,
             input_focused: None,
             last_frame: None,
             last_output: None,
             last_report: None,
-            last_mouse: (u32::MAX, u32::MAX, u8::MAX),
-            menu_open: false,
-            session_start: None,
-            // Fortnite and most xCloud titles support native keyboard/mouse; enable it
-            // by default. The in-game menu can switch back to the virtual gamepad.
-            native_input: true,
         }
-    }
-
-    /// Overrides the keyboard/mouse input mode. Production defaults to native
-    /// (`true`); tests that exercise the virtual-controller mapping opt out.
-    #[cfg(test)]
-    pub fn with_native_input(mut self, enabled: bool) -> Self {
-        self.native_input = enabled;
-        self
     }
 
     /// Attaches (or detaches) the wgpu path. Tests leave it `None`.
@@ -960,6 +1068,9 @@ impl StreamView {
         self.show_controls = true;
         self.was_connected = false;
         self.pressed_keys.clear();
+        self.mouse_buttons = 0;
+        self.pointer_locked = false;
+        self.quick_menu = false;
         self.input_focused = None;
         self.last_frame = None;
         self.last_output = None;
@@ -988,31 +1099,82 @@ impl StreamView {
             self.stream
                 .send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
         }
-        // Local hotkeys: F1 toggles the in-game menu (never reaches the cloud PC),
-        // Escape closes it. Only listen while the stream is connected.
-        if connected {
-            let menu_open = self.menu_open;
-            let menu_keys = ctx.input_mut(|i| take_menu_keys(i, menu_open));
-            if menu_keys.f1 {
-                self.menu_open = !self.menu_open;
-            }
-            if menu_keys.escape && self.menu_open {
-                self.menu_open = false;
+
+        // Global shortcuts while streaming: F1 quick menu, F8 lock MKB, F11 fullscreen.
+        // Check before native keyboard handling, which consumes all key events.
+        let (f1, f8, f11) = if connected {
+            ctx.input(|i| {
+                let mut f1 = false;
+                let mut f8 = false;
+                let mut f11 = false;
+                for ev in &i.events {
+                    if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = ev {
+                        if modifiers.is_none() || *modifiers == Modifiers::NONE {
+                            match key {
+                                Key::F1 => f1 = true,
+                                Key::F8 => f8 = true,
+                                Key::F11 => f11 = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                (f1, f8, f11)
+            })
+        } else {
+            (false, false, false)
+        };
+        if f1 || f8 || f11 {
+            ctx.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::F1);
+                i.consume_key(Modifiers::NONE, Key::F8);
+                i.consume_key(Modifiers::NONE, Key::F11);
+            });
+        }
+        if f1 {
+            self.quick_menu = !self.quick_menu;
+            if self.quick_menu {
+                self.release_pointer(&ctx);
+            } else {
+                self.show_controls = true;
+                self.controls_since = now;
             }
         }
-        if self.input_focused() {
-            self.handle_keyboard(&ctx);
+        if f8 {
+            let mut s = self.settings.read().clone();
+            if !s.native_mkb {
+                s.native_mkb = true;
+                *self.settings.write() = s.clone();
+                self.stream.send(StreamCommand::ApplySettings(s));
+            }
+            if self.pointer_locked {
+                self.release_pointer(&ctx);
+            } else {
+                self.request_activate(&ctx);
+                self.lock_pointer(&ctx);
+                self.quick_menu = false;
+            }
+            self.show_controls = true;
+            self.controls_since = now;
+        }
+        if f11 {
+            let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(!fs));
+        }
+
+        let native_mkb = settings.native_mkb && connected;
+        if self.input_focused() && !self.quick_menu {
+            if native_mkb {
+                self.handle_native_keyboard(&ctx);
+                self.handle_native_mouse(&ctx);
+            } else {
+                self.handle_keyboard(&ctx);
+            }
         }
 
         // Timer { running: stream.connected && root.showControls }.
         if connected && !self.was_connected {
             self.controls_since = now;
-            self.session_start = Some(Instant::now());
-            self.last_mouse = (u32::MAX, u32::MAX, u8::MAX);
-            self.menu_open = false;
-        } else if !connected && self.was_connected {
-            self.session_start = None;
-            self.menu_open = false;
         }
         self.was_connected = connected;
         if connected && self.show_controls {
@@ -1039,9 +1201,6 @@ impl StreamView {
         // controls. Added before the buttons so they win the hit test.
         let surface = ui.interact(area, self.surface_id(), Sense::click());
         surface.widget_info(|| WidgetInfo::labeled(Role::Group, true, SURFACE_LABEL));
-        if connected && self.native_input && self.input_focused() && !self.menu_open {
-            self.handle_native_mouse(&ctx, &surface, area);
-        }
         if surface.clicked() {
             self.request_activate(&ctx);
             if connected {
@@ -1057,119 +1216,19 @@ impl StreamView {
             self.show_controls_overlay(ui, area, &snapshot, &ctx);
         }
 
-        self.hud
-            .show_snapshot_for_path(ui, area, &snapshot, self.cpu_fallback);
-
-        if self.menu_open && connected {
-            self.show_menu(ui, area, &snapshot, &ctx);
+        let show_stats = settings.show_stats || settings.hud_enabled;
+        if show_stats {
+            self.hud
+                .show_snapshot_for_path(ui, area, &snapshot, self.cpu_fallback);
         }
 
-        if connected && !self.input_focused() && !self.menu_open {
+        if connected && !self.input_focused() && !self.quick_menu {
             self.show_focus_hint(ui, area, &ctx);
         }
-    }
 
-    /// The in-game overlay menu (F1). Lets the player enable performance stats,
-    /// switch native keyboard/mouse on or off, and see the current session time.
-    fn show_menu(&mut self, ui: &mut egui::Ui, area: Rect, snapshot: &StreamSnapshot, ctx: &egui::Context) {
-        // Keep the timer ticking while the menu is open.
-        ctx.request_repaint_after(Duration::from_secs(1));
-
-        let width: f32 = 320.0;
-        let height: f32 = 236.0;
-        let center = area.center();
-        let rect = Rect::from_center_size(
-            center,
-            vec2(width.min(area.width() - 24.0), height.min(area.height() - 24.0)),
-        );
-
-        // Dim the game behind the menu and draw the panel.
-        ui.painter().rect_filled(area, 0.0, Color32::from_black_alpha(150));
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(12), Color32::from_rgba_premultiplied(18, 20, 26, 245));
-        ui.painter().rect_stroke(
-            rect,
-            CornerRadius::same(12),
-            (1.5, Color32::from_rgb(70, 130, 180)),
-            egui::StrokeKind::Inside,
-        );
-
-        let mut child = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        child.add_space(14.0);
-        child.horizontal(|h| {
-            h.add_space(16.0);
-            h.label(egui::RichText::new("xCloud Menu").size(20.0).strong().color(Color32::WHITE));
-            h.add_space(8.0);
-            h.label(egui::RichText::new("F1").size(12.0).color(Color32::from_gray(150)));
-        });
-        child.add_space(6.0);
-        child.separator();
-        child.add_space(6.0);
-
-        // Session timer.
-        let elapsed = self
-            .session_start
-            .map(|s| s.elapsed())
-            .unwrap_or_default();
-        let secs = elapsed.as_secs();
-        let timer = format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60);
-        child.horizontal(|h| {
-            h.add_space(16.0);
-            h.label(egui::RichText::new("Session time").size(13.0).color(Color32::from_gray(170)));
-            h.add_space(8.0);
-            h.label(egui::RichText::new(&timer).size(15.0).strong().color(Color32::from_rgb(120, 200, 255)));
-        });
-        child.add_space(4.0);
-        child.horizontal(|h| {
-            h.add_space(16.0);
-            h.label(
-                egui::RichText::new(format!(
-                    "{} · {:.0} fps",
-                    snapshot.title_name, snapshot.stats.frames_per_second
-                ))
-                .size(11.0)
-                .color(Color32::from_gray(130)),
-            );
-        });
-        child.add_space(10.0);
-        child.separator();
-        child.add_space(8.0);
-
-        // Stats toggle ("estatísticas").
-        child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button(if snapshot.hud_enabled { "Estatísticas: ON" } else { "Estatísticas: OFF" }).clicked() {
-                self.stream.send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
-            }
-        });
-        child.add_space(8.0);
-
-        // Native keyboard/mouse toggle.
-        child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button(if self.native_input { "Teclado/mouse nativo: ON" } else { "Teclado/mouse nativo: OFF" }).clicked() {
-                self.native_input = !self.native_input;
-                self.stream.send(StreamCommand::SetNativeInputEnabled(self.native_input));
-            }
-        });
-        child.add_space(8.0);
-
-        // Stop stream / close menu.
-        child.horizontal(|h| {
-            h.add_space(16.0);
-            if h.button("Sair da sessão").clicked() {
-                self.stream.send(StreamCommand::StopStreaming);
-                self.menu_open = false;
-            }
-            h.add_space(8.0);
-            if h.button("Fechar menu").clicked() {
-                self.menu_open = false;
-            }
-        });
+        if self.quick_menu && connected {
+            self.show_quick_menu(ui, area, &ctx);
+        }
     }
 
     fn surface_id(&self) -> Id {
@@ -1223,30 +1282,16 @@ impl StreamView {
             self.request_activate(ctx);
         } else {
             self.pressed_keys.clear();
+            self.mouse_buttons = 0;
+            self.release_pointer(ctx);
             if !first {
                 self.stream.send(StreamCommand::ReleaseAll);
             }
         }
     }
 
-    /// `Keys.onPressed` / `Keys.onReleased`. Sends native VKey reports when native
-    /// keyboard input is enabled; otherwise falls back to the virtual gamepad.
+    /// `Keys.onPressed` / `Keys.onReleased`.
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
-        // While the overlay menu is open the game must not receive input.
-        if self.menu_open {
-            return;
-        }
-        let native = self.native_input;
-        if native {
-            let events = ctx.input_mut(take_native_key_events);
-            for event in events {
-                self.stream.send(StreamCommand::NativeKey {
-                    vkey: event.vkey,
-                    pressed: event.pressed,
-                });
-            }
-            return;
-        }
         let events = ctx.input_mut(take_key_events);
         for event in events {
             match key_action(event.name) {
@@ -1281,47 +1326,92 @@ impl StreamView {
         }
     }
 
-    /// Sends native mouse movement and button state over the xCloud `MOUSE` report.
-    /// Coordinates are relative to the video surface, scaled to the negotiated
-    /// server resolution, which is what the cloud client expects.
-    fn handle_native_mouse(&mut self, ctx: &egui::Context, surface: &Response, area: Rect) {
-        let Some(pos) = surface.hover_pos() else {
-            return;
-        };
-        let snapshot = self.stream.read();
-        let w = snapshot.stats.negotiated_width.max(0) as f32;
-        let h = snapshot.stats.negotiated_height.max(0) as f32;
-        drop(snapshot);
-        if w <= 0.0 || h <= 0.0 {
-            return;
+    /// Native MKB: forward each key event as an xCloud VKey report instead of
+    /// synthesizing gamepad buttons. Escape also releases the locked pointer.
+    fn handle_native_keyboard(&mut self, ctx: &egui::Context) {
+        let events = ctx.input_mut(take_all_key_events);
+        for (key, pressed) in events {
+            if key == Key::Escape && pressed {
+                self.release_pointer(ctx);
+            }
+            if let Some(virtual_key) = native_vkey(key) {
+                self.stream.send(StreamCommand::SendKeyboardFrame {
+                    virtual_key,
+                    pressed,
+                });
+            }
         }
-        let x = ((pos.x - area.left()) / area.width() * w).clamp(0.0, w - 1.0) as u32;
-        let y = ((pos.y - area.top()) / area.height() * h).clamp(0.0, h - 1.0) as u32;
+    }
 
-        let mut buttons = 0u8;
-        ctx.input(|i| {
-            if i.pointer.button_down(egui::PointerButton::Primary) {
-                buttons |= 1;
-            }
-            if i.pointer.button_down(egui::PointerButton::Secondary) {
-                buttons |= 2;
-            }
-            if i.pointer.button_down(egui::PointerButton::Middle) {
-                buttons |= 4;
-            }
-        });
-
-        if (x, y, buttons) != self.last_mouse {
-            self.last_mouse = (x, y, buttons);
-            self.stream.send(StreamCommand::NativeMouse {
-                x,
-                y,
-                wheel_x: 0,
-                wheel_y: 0,
-                buttons,
-                relative: false,
+    /// Native MKB: send relative mouse movement, button changes and wheel ticks.
+    fn handle_native_mouse(&mut self, ctx: &egui::Context) {
+        use egui::{Event, MouseWheelUnit, PointerButton};
+        let (delta, wheel, buttons) = ctx.input_mut(|i| {
+            let mut wheel = Vec2::ZERO;
+            // Consume raw wheel events: `smooth_scroll_delta` includes trackpad
+            // momentum and is zeroed by egui scroll areas, neither of which is
+            // what a game expects from a mouse wheel.
+            i.events.retain(|event| {
+                if let Event::MouseWheel { unit, delta, .. } = event {
+                    let scale = match unit {
+                        MouseWheelUnit::Line => 100.0,
+                        MouseWheelUnit::Page => 500.0,
+                        MouseWheelUnit::Point => 1.0,
+                    };
+                    wheel += *delta * scale;
+                    return false;
+                }
+                true
             });
+            let pointer = &i.pointer;
+            let buttons = u8::from(pointer.button_down(PointerButton::Primary))
+                | u8::from(pointer.button_down(PointerButton::Secondary)) << 1
+                | u8::from(pointer.button_down(PointerButton::Middle)) << 2;
+            // Under pointer lock winit keeps the cursor position fixed, so
+            // `delta` can be zero; `motion` carries the raw relative movement.
+            let movement = pointer
+                .motion()
+                .filter(|m| *m != Vec2::ZERO)
+                .unwrap_or_else(|| pointer.delta());
+            (movement, wheel, buttons)
+        });
+        let dx = delta.x.round() as i32;
+        let dy = delta.y.round() as i32;
+        let wx = wheel.x.round() as i32;
+        let wy = wheel.y.round() as i32;
+        if dx == 0 && dy == 0 && wx == 0 && wy == 0 && buttons == self.mouse_buttons {
+            return;
         }
+        self.mouse_buttons = buttons;
+        self.stream.send(StreamCommand::SendMouseFrame {
+            x: dx,
+            y: dy,
+            wheel_x: wx,
+            wheel_y: wy,
+            buttons,
+        });
+    }
+
+    fn lock_pointer(&mut self, ctx: &egui::Context) {
+        if self.pointer_locked {
+            return;
+        }
+        ctx.send_viewport_cmd(ViewportCommand::CursorGrab(
+            egui::viewport::CursorGrab::Locked,
+        ));
+        ctx.send_viewport_cmd(ViewportCommand::CursorVisible(false));
+        self.pointer_locked = true;
+    }
+
+    fn release_pointer(&mut self, ctx: &egui::Context) {
+        if !self.pointer_locked {
+            return;
+        }
+        ctx.send_viewport_cmd(ViewportCommand::CursorGrab(
+            egui::viewport::CursorGrab::None,
+        ));
+        ctx.send_viewport_cmd(ViewportCommand::CursorVisible(true));
+        self.pointer_locked = false;
     }
 
     /// `updateLeftStick()`: the summed deflection of every held WASD key (y up).
@@ -1352,7 +1442,7 @@ impl StreamView {
         let now = ui.ctx().input(|i| i.time);
 
         if self.video_path() == VideoPath::Gpu {
-            match self.show_video_gpu(ui, area, &frame, is_new) {
+            match self.show_video_gpu(ui, area, &frame, is_new, settings) {
                 GpuStep::Drawn(output) => {
                     self.last_frame = Some(identity);
                     self.last_output = Some(output);
@@ -1369,7 +1459,7 @@ impl StreamView {
         };
         self.last_frame = Some(identity);
         self.last_output = Some(output);
-        self.cpu.draw(ui.painter(), area, output);
+        self.cpu.draw(ui.painter(), area, output, settings);
         self.report_output(output, now);
     }
 
@@ -1381,6 +1471,7 @@ impl StreamView {
         area: Rect,
         frame: &Arc<Frame>,
         is_new: bool,
+        settings: &AppSettings,
     ) -> GpuStep {
         let Some(gpu) = self.gpu.as_mut() else {
             return GpuStep::FallBack;
@@ -1395,12 +1486,12 @@ impl StreamView {
                 GpuStep::Failed
             };
         };
-        let video_rect = xcloud_gpu::letterbox(area, output.width, output.height);
+        let video_rect = video_display_rect(area, output.width, output.height, settings);
         if is_new {
             ui.painter()
                 .add(gpu.callback(video_rect, Arc::clone(frame)));
         }
-        gpu.draw(ui.painter(), area, output);
+        gpu.draw(ui.painter(), area, output, settings);
         GpuStep::Drawn(output)
     }
 
@@ -1729,6 +1820,98 @@ impl StreamView {
         }
     }
 
+    fn show_quick_menu(&mut self, ui: &mut egui::Ui, area: Rect, ctx: &egui::Context) {
+        let panel_w = 340.0_f32.min(area.width() * 0.42).max(280.0);
+        let panel = Rect::from_min_max(area.min, pos2(area.min.x + panel_w, area.max.y));
+        ui.painter().rect_filled(panel, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(18, 12, 28, 242));
+        ui.painter().line_segment(
+            [pos2(panel.max.x, panel.min.y), pos2(panel.max.x, panel.max.y)],
+            egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.45)),
+        );
+
+        let mut settings = self.settings.read().clone();
+        let mut changed = false;
+        let mut close_menu = false;
+        let mut stop = false;
+
+        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(panel.shrink2(vec2(18.0, 20.0))));
+        child_ui.vertical(|ui| {
+            ui.label(egui::RichText::new("NexaCloud Menu").font(theme::font_w(28.0, theme::Weight::Bold)).color(theme::TEXT_PRIMARY));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("F1 abre/fecha • F8 trava mouse/teclado • F11 tela cheia • Esc solta ponteiro").font(theme::font(12.5)).color(theme::TEXT_SECONDARY));
+            ui.add_space(14.0);
+
+            if kit::Button::new("Voltar ao jogo").icon(icons::Icon::Play).primary().min_width(220.0).show(ui).clicked() {
+                close_menu = true;
+            }
+            ui.add_space(8.0);
+            let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            let fs_label = if fs { "Sair da tela cheia" } else { "Tela cheia (F11)" };
+            let fs_icon = if fs { icons::Icon::ExitFullscreen } else { icons::Icon::Fullscreen };
+            if kit::Button::new(fs_label).icon(fs_icon).tone(kit::Tone::Glass).min_width(220.0).show(ui).clicked() {
+                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(!fs));
+            }
+            ui.add_space(8.0);
+            if kit::Button::new("Sair do stream").icon(icons::Icon::Close).tone(kit::Tone::Secondary).min_width(220.0).show(ui).clicked() {
+                stop = true;
+            }
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("Overlay / imagem").font(theme::font_w(16.0, theme::Weight::Semibold)).color(theme::TEXT_PRIMARY));
+            ui.add_space(8.0);
+
+            changed |= kit::setting_row(ui, "Mostrar estatisticas", "Overlay de performance/estatisticas", |ui| {
+                kit::toggle(ui, &mut settings.show_stats, "Mostrar estatisticas").changed()
+            });
+            changed |= kit::setting_row(ui, "HUD legado", "HUD antigo do stream", |ui| {
+                let r = kit::toggle(ui, &mut settings.hud_enabled, "HUD legado").changed();
+                if r { self.stream.send(StreamCommand::SetHudEnabled(settings.hud_enabled)); }
+                r
+            });
+            changed |= kit::setting_row(ui, "Esticar imagem", "Preenche a tela ignorando proporcao", |ui| {
+                kit::toggle(ui, &mut settings.stretch_video, "Esticar imagem").changed()
+            });
+            let mut zoom = settings.video_zoom;
+            if kit::setting_row(ui, "Zoom da imagem", "Ajusta proporcao/zoom", |ui| {
+                let r = ui.add(egui::Slider::new(&mut zoom, 0.5..=3.0).text("")).changed();
+                r
+            }) {
+                settings.video_zoom = zoom;
+                changed = true;
+            }
+            ui.label(egui::RichText::new(format!("Zoom: {:.2}x", settings.video_zoom)).font(theme::font(12.5)).color(theme::TEXT_SECONDARY));
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("Controles").font(theme::font_w(16.0, theme::Weight::Semibold)).color(theme::TEXT_PRIMARY));
+            ui.add_space(8.0);
+            changed |= kit::setting_row(ui, "Native MKB", "Teclado/mouse nativos (F8 trava)", |ui| {
+                kit::toggle(ui, &mut settings.native_mkb, "Native MKB").changed()
+            });
+        });
+
+        if changed {
+            *self.settings.write() = settings.clone();
+            self.stream.send(StreamCommand::ApplySettings(settings));
+        }
+        if stop {
+            self.quick_menu = false;
+            self.release_pointer(ctx);
+            self.stream.send(StreamCommand::StopStreaming);
+        } else if close_menu {
+            self.quick_menu = false;
+        } else if ctx.input(|i| i.pointer.any_click()) {
+            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                if !panel.contains(pos) {
+                    self.quick_menu = false;
+                }
+            }
+        }
+    }
+
     /// The "Click to enable controls" pill (`z: 3`).
     fn show_focus_hint(&self, ui: &mut egui::Ui, area: Rect, ctx: &egui::Context) {
         let galley = ui.painter().layout_no_wrap(
@@ -1822,7 +2005,7 @@ mod tests {
         let video: VideoSource = Arc::new(parking_lot::Mutex::new(reader));
         let settings = Arc::new(RwLock::new(AppSettings::default()));
         Fixture {
-            view: StreamView::new(handle, video, settings).with_native_input(false),
+            view: StreamView::new(handle, video, settings),
             snapshot,
             rx,
             writer,
@@ -1983,78 +2166,6 @@ mod tests {
                 "{key:?}"
             );
         }
-    }
-
-    #[test]
-    fn native_keyboard_sends_windows_vkey_reports() {
-        // Production default: native keyboard/mouse is enabled.
-        let (handle, _snapshot, rx) = Handle::new(connected());
-        let (_writer, reader) = FrameMailbox::open();
-        let video: VideoSource = Arc::new(parking_lot::Mutex::new(reader));
-        let settings = Arc::new(RwLock::new(AppSettings::default()));
-        let mut view = StreamView::new(handle, video, settings);
-        let mut h = harness(&mut view);
-        h.run();
-        drain(&rx);
-
-        h.key_press(Key::W);
-        h.step();
-        assert_eq!(
-            drain(&rx),
-            [
-                StreamCommand::NativeKey {
-                    vkey: 0x57,
-                    pressed: true
-                },
-                StreamCommand::NativeKey {
-                    vkey: 0x57,
-                    pressed: false
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn f1_toggles_the_in_game_menu_and_blocks_game_input() {
-        let Fixture { mut view, rx, .. } = fixture(connected());
-        let mut h = harness(&mut view);
-        h.run();
-        drain(&rx);
-
-        // F1 is a local hotkey: it opens the menu and is never sent to the cloud.
-        h.key_press(Key::F1);
-        h.step();
-        assert!(drain(&rx).is_empty());
-
-        // While the menu is open the game receives no keyboard input.
-        h.key_press(Key::Space);
-        h.step();
-        assert!(drain(&rx).is_empty(), "menu must swallow game keys");
-
-        // Escape closes the menu and is consumed while it is open.
-        h.key_press(Key::Escape);
-        h.step();
-        drain(&rx);
-
-        // After closing, keys reach the game again (virtual-controller fallback
-        // in this fixture, which opts out of native input).
-        h.key_press(Key::Space);
-        h.step();
-        let commands = drain(&rx);
-        assert!(
-            commands.contains(&StreamCommand::SetKey {
-                name: "a".into(),
-                pressed: true
-            }),
-            "{commands:?}"
-        );
-        assert!(
-            commands.contains(&StreamCommand::SetKey {
-                name: "a".into(),
-                pressed: false
-            }),
-            "{commands:?}"
-        );
     }
 
     #[test]
@@ -2823,6 +2934,7 @@ mod tests {
             assert_eq!(vr.upscaler(), Upscaler::MetalFx);
             let expected = match vr.active_upscaler() {
                 Upscaler::MetalFx => "FX",
+                Upscaler::Vsr => "VSR",
                 Upscaler::Fsr => "FSR",
                 Upscaler::Bypass => "",
             };

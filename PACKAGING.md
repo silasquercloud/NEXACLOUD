@@ -17,7 +17,7 @@ then packages that exact executable. Output goes to `dist/`.
 brew install ffmpeg cmake pkg-config llvm dylibbundler
 ```
 
-`OpenXCloud-macos-<architecture>.zip` contains `OpenXCloud.app`. FFmpeg and its
+`NexaCloud-macos-<architecture>.zip` contains `NexaCloud.app`. FFmpeg and its
 transitive dynamic libraries are copied into the app and their load paths rewritten.
 Packaging rejects unresolved external library paths and verifies an ad-hoc signature.
 It also includes the project licence and third-party notices.
@@ -43,23 +43,90 @@ sudo apt-get install -y build-essential pkg-config cmake clang libclang-dev \
   libx11-dev libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers
 ```
 
-`OpenXCloud-linux-<architecture>.deb` uses system runtime libraries. The packaging
+`NexaCloud-linux-<architecture>.deb` uses system runtime libraries. The packaging
 script derives versioned dependencies with `dpkg-shlibdeps` and adds the dynamically
-loaded Vulkan loader. Install it with `sudo apt install ./dist/OpenXCloud-linux-*.deb`
+loaded Vulkan loader. Install it with `sudo apt install ./dist/NexaCloud-linux-*.deb`
 on a compatible distribution. Packages are tied to their build distro and
 architecture; they are not portable Linux binaries. A working graphics driver and
 desktop session are required for playback.
 
+## Windows (x64)
+
+Windows uses its own script, run from PowerShell (5.1 or 7) on Windows 10/11:
+
+```powershell
+$env:FFMPEG_DIR = 'C:\path\to\ffmpeg-n9.0.2-...-win64-lgpl-shared-9.0'
+$env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
+.\scripts\package-windows.ps1
+```
+
+Prerequisites: Rust with the MSVC toolchain and the Windows SDK (Visual Studio Build
+Tools; `rc.exe` embeds the icon, version info and manifest), LLVM for bindgen,
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) (or pass `-Iscc path\to\ISCC.exe`),
+and an FFmpeg 9 **shared** build. CI uses the LGPL shared build from
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), pinned by URL and SHA-256
+in `.github/actions/native-deps/action.yml`. BtbN keeps month-end builds published, so
+bump the pin to another month-end `autobuild-*` release.
+
+Outputs in `dist/`:
+
+- `NexaCloud-windows-x64-setup.exe`: Inno Setup installer
+  (`packaging/windows/nexacloud.iss`). Installs per user without admin rights by
+  default; its first page also offers an all-users install. Adds a Start menu entry,
+  an optional desktop shortcut, an uninstaller, and an Apps & features entry.
+  Re-running a newer installer upgrades in place and closes a running NexaCloud
+  first. `/VERYSILENT` (add `/ALLUSERS` or `/CURRENTUSER`) installs unattended.
+  Uninstalling keeps settings, sign-in tokens (Windows Credential Manager) and logs.
+- `NexaCloud-windows-x64.zip`: the same files as a portable folder.
+
+What the script does:
+
+1. Builds with the static MSVC runtime (`+crt-static`, in `target\windows-package`),
+   so no Visual C++ redistributable is needed.
+2. Reads the PE import tables of the exe and, transitively, of every DLL it bundles.
+   It copies the FFmpeg DLLs that are actually imported and fails on any other
+   non-system DLL (including `vcruntime140.dll`).
+3. Adds `LICENSE.txt`, `THIRD_PARTY_NOTICES.md`, FFmpeg's licence, and
+   `licenses\FFmpeg-BUILD.txt`, which records the exact FFmpeg build (version,
+   configure line, archive URL and SHA-256) and its source location.
+4. Starts the staged `nexacloud.exe --version` once. A missing DLL fails process
+   creation, so this proves the bundle is complete.
+5. Zips the folder and compiles the installer.
+
+Release builds use the GUI subsystem (no console window). Started from a terminal,
+the app attaches to it, so `--help`, `--smoke` and the stderr log still show.
+Requirements: 64-bit Windows 10 1809 or newer. NVIDIA/Intel Video Super Resolution
+needs the DX12 adapter and the driver setting (see the README).
+
+The installer and the exe are **not code-signed**. SmartScreen shows "Windows
+protected your PC" until the publisher has reputation. Signing needs a code-signing
+certificate (for example Azure Trusted Signing) and a `signtool sign` step over
+`nexacloud.exe` and the setup exe. Inno Setup is free for non-commercial use, which
+covers this project; check its licence before reusing the script commercially.
+
 ## GitHub Actions
 
-- `desktop.yml`: macOS/Linux formatting, workspace tests, Clippy, native packages,
-  and downloadable artifacts retained for 14 days. Runs on pushes, pull requests,
-  and manual dispatch. The synthetic H.264 test fixture is generated with FFmpeg.
-- `transport.yml`: protocol and WebRTC tests on macOS, Linux, and Windows.
-
-- `release.yml`: pushing a version tag such as `v0.1.0` runs both reusable check
-  workflows, then uploads the macOS Apple Silicon ZIP, Ubuntu 24.04 amd64 `.deb`,
-  and `SHA256SUMS` to a GitHub Release. Only the publish job has write permission.
+- `ci.yml`: runs on pull requests, pushes to `main`, merge queues and manual dispatch.
+  - `Format`: `cargo fmt --check` (no native dependencies, finishes in seconds).
+  - `Clippy and tests`: Clippy and the full workspace test suite on Linux and macOS.
+    The synthetic H.264 test fixture is generated with FFmpeg.
+  - `Portable transport`: protocol and WebRTC tests on Windows.
+  - `Desktop build (windows)`: Clippy for the desktop app against the pinned FFmpeg,
+    plus Clippy and tests for the GPU crate with Video Super Resolution compiled in.
+    Runners have no GPU, so the hardware tests skip.
+  - `Package`: native packages for macOS, Linux and Windows, uploaded as artifacts
+    retained for 14 days. Built only on pushes to `main`, manual dispatch, and
+    releases, never for pull requests. Inno Setup is pinned by URL and SHA-256 and
+    installed in portable mode.
+  - Native libraries come from the shared `.github/actions/native-deps` action.
+  - Build caching uses [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache).
+    Only `main` writes caches; pull requests and tags restore them read-only so
+    short-lived branches don't evict the repository's 10 GB cache. `cargo-bundle` is
+    cached separately instead of being compiled on every package run.
+- `release.yml`: pushing a version tag such as `v0.1.0` runs `ci.yml` with packaging
+  enabled, then uploads the macOS Apple Silicon ZIP, Ubuntu 24.04 amd64 `.deb`,
+  Windows x64 installer and portable ZIP, and `SHA256SUMS` to a GitHub Release. Only the publish job has write permission.
+- `dependabot.yml`: weekly grouped updates for GitHub Actions and Cargo dependencies.
 
 ### Publish a release
 
@@ -67,7 +134,7 @@ Set `workspace.package.version` in `Cargo.toml`, update `Cargo.lock`, and commit
 and push the release changes (including the release workflow). Tag that commit:
 
 ```sh
-git tag -a v0.1.0 -m "OpenXCloud 0.1.0"
+git tag -a v0.1.0 -m "NexaCloud 0.1.0"
 git push origin v0.1.0
 ```
 
@@ -76,60 +143,13 @@ The tag must match the Cargo version exactly. Tags containing a prerelease suffi
 produce CI artifacts. No additional token or signing secret is required: the
 publish job uses GitHub's built-in `GITHUB_TOKEN`.
 
-Both platforms and transport tests must succeed before a draft release is created.
-The draft becomes public only after all three assets upload. If uploading fails,
+All CI checks and all three platform packages must succeed before a draft release is
+created. The draft becomes public only after all five assets upload. If uploading fails,
 rerun the failed jobs to finish the draft. Published release assets are never
 replaced by a rerun; use a new version tag for corrections. Downloaded packages
 can be checked with `sha256sum -c SHA256SUMS` (macOS: `shasum -a 256 -c SHA256SUMS`).
 
-Publishing does not add Developer ID signing or notarization.
-
-### Windows (x86_64)
-
-Windows packages are produced by `desktop.yml` on `windows-latest`. The runner
-installs ffmpeg through vcpkg (`FFMPEG_DIR` is exported for `ffmpeg-sys-next`),
-builds with `cargo build --locked --release -p xcloud-app --all-features`, and
-`scripts/package-windows.ps1` zips `openxcloud.exe`, its licenses and the ffmpeg
-runtime DLLs into `OpenXCloud-windows-x86_64.zip`. The release workflow verifies
-and publishes that ZIP alongside the macOS and Linux assets. The binary is
-unsigned — Windows SmartScreen may warn on first run.
-
-### Android
-
-The Rust/WGPU desktop client does not currently build for Android (no mobile
-video backend, no touch UI, no Keystore-backed token store). The publishable APK
-lives in `android/` and is a thin WebView shell around the official xCloud web
-player (`https://www.xbox.com/play`), which supplies **native touch** input
-through the same xCloud `POINTER` reports the desktop client uses for pointer
-devices. It is built by `android.yml` on `ubuntu-latest` (preinstalled Android
-SDK + JDK) and attached to releases as `OpenXCloud-android.apk`. It is not the
-native Rust renderer; see `android/README.md` for the exact scope.
-
-## Local build on this machine (Arch/Omarchy)
-
-Both packages were built locally and placed in `~/Downloads`:
-
-```sh
-bash scripts/build-windows-local.sh   # -> ~/Downloads/OpenXCloud-windows-x86_64.zip
-bash scripts/build-android-local.sh   # -> ~/Downloads/OpenXCloud-android.apk
-```
-
-Windows cross-build notes: `mingw-w64` plus the `x86_64-pc-windows-gnu` Rust target
-are required. The script downloads a shared FFmpeg build into
-`~/.local/ffmpeg-windows`. Because BtbN's `latest` headers are newer than the
-`ffmpeg-next 9` enum tables, the workspace enables that crate's
-`non-exhaustive-enums` feature. Two local bindgen shims live in `scripts/`:
-`cuda-bindgen-stub.h` covers CUDA types the wrapper does not declare, and the
-`-D__AMX*_INTRIN_H` flags skip clang's AMX intrinsic headers, which bindgen 0.73
-renders with conflicting `packed`/`align` hints. The APK is signed with the
-standard Android debug key (suitable for sideloading, not for Play Store).
-
-SHA-256 of the artifacts produced here:
-
-```
-82aadca73c889227f4b3805707fe5e2250365a931e05439385c95e71a757fd17  OpenXCloud-windows-x86_64.zip
-67ab55c70a52e668c6db021bbb122abf73cf5473fb6bbfa27614bd94c8b96def  OpenXCloud-android.apk
-```
+Publishing does not add Developer ID signing, notarization or Windows code signing.
 
 For local workspace tests, first run `bash scripts/generate-test-fixture.sh`.
 The generated video stays ignored by Git; no account or recorded stream is needed.

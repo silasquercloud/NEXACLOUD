@@ -693,6 +693,17 @@ pub fn make_start_stream_body(
         "settings": make_stream_settings(preferences),
         "serverId": server_id,
         "fallbackRegionNames": preferences.fallback_region_names,
+        // Declares native keyboard/mouse support to the streaming service, the
+        // same override the official web player sends. Without it the console
+        // never switches titles that support MKB into keyboard mode.
+        "clientStreamingConfigOverrides": json!({
+            "inputConfiguration": {
+                "enableKeyboardInput": true,
+                "enableMouseInput": true,
+                "enableAbsoluteMouse": false,
+            }
+        })
+        .to_string(),
     })
 }
 
@@ -1168,9 +1179,13 @@ mod tests {
         assert_eq!(body["serverId"], "");
         assert_eq!(body["clientSessionId"], "");
         assert_eq!(body["systemUpdateGroup"], "");
-        assert_eq!(body["settings"]["osName"], "android");
+        assert_eq!(body["settings"]["osName"], "xbox");
         assert_eq!(body["settings"]["nanoVersion"], "V3;WebrtcTransport.dll");
         assert_eq!(body["fallbackRegionNames"][0], "eastus");
+        let overrides: Value =
+            serde_json::from_str(body["clientStreamingConfigOverrides"].as_str().unwrap()).unwrap();
+        assert_eq!(overrides["inputConfiguration"]["enableKeyboardInput"], true);
+        assert_eq!(overrides["inputConfiguration"]["enableMouseInput"], true);
 
         let home = make_start_stream_body(StreamKind::Home, "SERVER", &preferences);
         assert_eq!(home["titleId"], "");

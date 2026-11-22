@@ -14,6 +14,17 @@ use crate::ui::icons::{self, Icon};
 use crate::ui::kit::Button;
 use crate::ui::widgets;
 
+/// Where `KeyringTokenStore` keeps tokens on this platform, for the sign-in footnote.
+fn credential_store_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "the macOS Keychain"
+    } else if cfg!(windows) {
+        "Windows Credential Manager"
+    } else {
+        "your system keyring"
+    }
+}
+
 /// `SignInView`'s button text for the current session state.
 pub fn sign_in_button_text(session: &SessionSnapshot) -> &'static str {
     if session.is_busy {
@@ -71,7 +82,7 @@ pub fn auth_layout(ui: &mut Ui, card_height: f32, card: impl FnOnce(&mut Ui)) {
         ui.painter().text(
             pos2(left + 68.0, y + 26.0),
             Align2::LEFT_CENTER,
-            "OpenXCloud",
+            "NexaCloud",
             font_w(22.0, Weight::Bold),
             theme::TEXT_PRIMARY,
         );
@@ -188,7 +199,10 @@ impl SignInView {
             }
             ui.add_space(18.0);
             ui.label(
-                RichText::new("A Microsoft sign-in window will open in your browser. Your session is saved securely on this device, so you stay signed in.")
+                RichText::new(format!(
+                    "You'll get a short code to enter on microsoft.com/link. Your tokens are kept in {}.",
+                    credential_store_name()
+                ))
                     .font(theme::font(13.0))
                     .color(theme::TEXT_TERTIARY),
             );

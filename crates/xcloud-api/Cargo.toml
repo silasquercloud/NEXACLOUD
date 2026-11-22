@@ -22,4 +22,3 @@ keyring = { workspace = true }
 directories = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
-sha2 = "0.11"

@@ -6,9 +6,7 @@
 //! injected one-shot frames are kept in order and emitted ahead of the polled
 //! ones; timing metadata is appended as-is.
 
-use super::models::{
-    FrameTimingMetadata, GamepadInputFrame, KeyboardFrame, MouseFrame, PointerFrame,
-};
+use super::models::{FrameTimingMetadata, GamepadInputFrame, KeyboardFrame, MouseFrame};
 use super::packet;
 
 /// The two `InputQueue` calls the input channel makes: `makeInitialMetadata()`
@@ -29,12 +27,8 @@ pub struct InputQueue {
     injected: Vec<GamepadInputFrame>,
     pending: Vec<GamepadInputFrame>,
     timing: Vec<FrameTimingMetadata>,
-    pointer: Vec<PointerFrame>,
-    mouse: Vec<MouseFrame>,
     keyboard: Vec<KeyboardFrame>,
-    /// Advertised to the host in the ClientMetadata packet on channel open.
-    /// The browser client uses 1; touch clients can raise it for multi-touch.
-    max_touch_points: u8,
+    mouse: Vec<MouseFrame>,
 }
 
 impl InputQueue {
@@ -66,19 +60,14 @@ impl InputQueue {
         self.timing.push(frame);
     }
 
-    /// Queues a native keyboard event (VKey press/release) for the next packet.
+    /// Queues a native keyboard event (Windows virtual-key report).
     pub fn enqueue_keyboard_frame(&mut self, frame: KeyboardFrame) {
         self.keyboard.push(frame);
     }
 
-    /// Queues a native mouse event for the next packet.
+    /// Queues a native mouse movement / button / wheel event.
     pub fn enqueue_mouse_frame(&mut self, frame: MouseFrame) {
         self.mouse.push(frame);
-    }
-
-    /// Queues native touch/pointer events for the next packet.
-    pub fn enqueue_pointer_frame(&mut self, frame: PointerFrame) {
-        self.pointer.push(frame);
     }
 
     /// Builds a packet with every queued frame and clears the queue.
@@ -88,15 +77,13 @@ impl InputQueue {
         let mut gamepad_frames = std::mem::take(&mut self.injected);
         gamepad_frames.append(&mut self.pending);
         let timing_frames = std::mem::take(&mut self.timing);
-        let pointer_frames = std::mem::take(&mut self.pointer);
-        let mouse_frames = std::mem::take(&mut self.mouse);
         let keyboard_frames = std::mem::take(&mut self.keyboard);
+        let mouse_frames = std::mem::take(&mut self.mouse);
 
         if gamepad_frames.is_empty()
             && timing_frames.is_empty()
-            && pointer_frames.is_empty()
-            && mouse_frames.is_empty()
             && keyboard_frames.is_empty()
+            && mouse_frames.is_empty()
         {
             return None;
         }
@@ -105,21 +92,15 @@ impl InputQueue {
             sequence,
             &gamepad_frames,
             &timing_frames,
-            &pointer_frames,
-            &mouse_frames,
             &keyboard_frames,
+            &mouse_frames,
             now_ms,
         ))
     }
 
-    /// Number of simultaneous touch contacts advertised to the host (default 1).
-    pub fn set_max_touch_points(&mut self, count: u8) {
-        self.max_touch_points = count.max(1);
-    }
-
     /// The ClientMetadata packet sent when the input channel opens.
     pub fn make_initial_metadata(&mut self, now_ms: u64) -> Vec<u8> {
-        packet::client_metadata(self.next_sequence(), self.max_touch_points, now_ms)
+        packet::client_metadata(self.next_sequence(), 1, now_ms)
     }
 
     /// Returns the current sequence number and advances it (wrapping at `u32::MAX`).
@@ -134,9 +115,8 @@ impl InputQueue {
         !(self.injected.is_empty()
             && self.pending.is_empty()
             && self.timing.is_empty()
-            && self.pointer.is_empty()
-            && self.mouse.is_empty()
-            && self.keyboard.is_empty())
+            && self.keyboard.is_empty()
+            && self.mouse.is_empty())
     }
 }
 
@@ -267,5 +247,36 @@ mod tests {
         let packet = queue.flush(0).expect("packet");
         assert_eq!(packet::report_type_of(&packet), 3);
         assert!(queue.flush(0).is_none());
+    }
+
+    #[test]
+    fn keyboard_and_mouse_reports_use_browser_wire_format() {
+        use super::{KeyboardFrame, MouseFrame};
+        use crate::input::packet::ReportType;
+
+        let mut queue = InputQueue::new();
+        queue.enqueue_keyboard_frame(KeyboardFrame::vkey(0x57, true)); // W down
+        queue.enqueue_keyboard_frame(KeyboardFrame::vkey(0x57, false)); // W up
+        queue.enqueue_mouse_frame(MouseFrame::relative(-4, 9, 0, 0, 1));
+
+        let packet = queue.flush(7).expect("packet");
+        let report = ReportType(packet::report_type_of(&packet));
+        assert!(report.contains(ReportType::MOUSE));
+        assert!(report.contains(ReportType::KEYBOARD));
+        assert!(!report.contains(ReportType::GAMEPAD));
+
+        // Header (14) + mouse count/frame (1 + 18) + keyboard count/frames (1 + 6).
+        assert_eq!(packet.len(), 14 + 19 + 7);
+        assert_eq!(packet[14], 1); // one mouse frame
+        assert_eq!(
+            u32::from_le_bytes(packet[15..19].try_into().unwrap()),
+            (-4i32) as u32
+        );
+        assert_eq!(packet[31], 1); // left button
+        assert_eq!(packet[32], 0); // relative
+        assert_eq!(packet[33], 2); // two keyboard frames
+        assert_eq!(&packet[34..37], &[2, 1, 0x57]); // VKey, pressed, W
+        assert_eq!(&packet[37..40], &[2, 0, 0x57]); // VKey, released, W
+        assert!(!queue.has_pending());
     }
 }

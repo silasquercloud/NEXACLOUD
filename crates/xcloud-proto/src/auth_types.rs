@@ -119,12 +119,6 @@ pub struct StreamTokens {
     pub web_token: String,
     #[serde(rename = "webTokenUHS")]
     pub web_token_uhs: String,
-    /// Gamertag (`userid` claim) decoded from the stream token, for the account UI.
-    #[serde(rename = "gamertag", default)]
-    pub gamertag: String,
-    /// Xbox user id (`xuid` claim) decoded from the stream token.
-    #[serde(rename = "xuid", default)]
-    pub xuid: String,
     #[serde(rename = "xcloudRegions")]
     pub xcloud_regions: Vec<LoginRegion>,
 }
@@ -151,8 +145,6 @@ impl StreamTokens {
             xcloud_f2p_host: string_at(object, "xcloudF2PHost"),
             web_token: string_at(object, "webToken"),
             web_token_uhs: string_at(object, "webTokenUHS"),
-            gamertag: string_at(object, "gamertag"),
-            xuid: string_at(object, "xuid"),
             xcloud_regions: array_at(object, "xcloudRegions")
                 .iter()
                 .map(LoginRegion::from_json)
@@ -268,8 +260,6 @@ mod tests {
             xcloud_f2p_host: "https://f2p".to_owned(),
             web_token: "WEB".to_owned(),
             web_token_uhs: "UHS".to_owned(),
-            gamertag: "GamerTag".to_owned(),
-            xuid: "12345".to_owned(),
             xcloud_regions: vec![region("eastus", true), region("westeurope", false)],
         };
         let json = tokens.to_json();
