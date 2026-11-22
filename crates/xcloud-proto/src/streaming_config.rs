@@ -23,7 +23,8 @@ impl Default for QualityTierProfile {
             width: 1920,
             height: 1080,
             max_bitrate_kbps: 20000,
-            fps: 60,
+            // Performance build: allow 120/240 fps requests.
+            fps: 240,
         }
     }
 }
@@ -40,7 +41,7 @@ pub fn quality_tier_profile(mode: StreamResolutionMode) -> QualityTierProfile {
         width,
         height,
         max_bitrate_kbps,
-        fps: 60,
+        fps: 240,
     }
 }
 
@@ -283,14 +284,31 @@ mod tests {
         .with_resolution(StreamResolutionMode::P1080);
         assert_eq!(thirty.preferred_frame_rate, 30);
         assert_eq!(thirty.requested_video_max_frame_rate, 30);
-        let too_fast = StreamingConfig {
+        // This performance build advertises a 240 fps cap.
+        let fast = StreamingConfig {
             preferred_frame_rate: 120,
             requested_video_max_frame_rate: 120,
             ..StreamingConfig::defaults()
         }
         .with_resolution(StreamResolutionMode::P1080);
-        assert_eq!(too_fast.preferred_frame_rate, 60);
-        assert_eq!(too_fast.requested_video_max_frame_rate, 60);
+        assert_eq!(fast.preferred_frame_rate, 120);
+        assert_eq!(fast.requested_video_max_frame_rate, 120);
+        let max = StreamingConfig {
+            preferred_frame_rate: 240,
+            requested_video_max_frame_rate: 240,
+            ..StreamingConfig::defaults()
+        }
+        .with_resolution(StreamResolutionMode::P1080);
+        assert_eq!(max.preferred_frame_rate, 240);
+        assert_eq!(max.requested_video_max_frame_rate, 240);
+        let too_fast = StreamingConfig {
+            preferred_frame_rate: 300,
+            requested_video_max_frame_rate: 300,
+            ..StreamingConfig::defaults()
+        }
+        .with_resolution(StreamResolutionMode::P1080);
+        assert_eq!(too_fast.preferred_frame_rate, 240);
+        assert_eq!(too_fast.requested_video_max_frame_rate, 240);
         let zero = StreamingConfig {
             preferred_frame_rate: 0,
             ..StreamingConfig::defaults()

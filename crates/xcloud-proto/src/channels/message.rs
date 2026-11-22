@@ -84,7 +84,8 @@ impl MessageChannel {
             capability_width: 1920,
             capability_height: 1080,
             capability_bitrate_kbps: 20000,
-            capability_fps: 60,
+            // Performance build advertises 120/240 fps support.
+            capability_fps: 240,
             handshake_started: false,
             handshake_completed: false,
             has_sent_dimensions: false,
@@ -522,7 +523,7 @@ mod tests {
         );
         assert_eq!(
             with_placeholder_id(sent[4]),
-            r#"{"content":"{\"maxBitrateKbps\":20000,\"maxHeight\":1080,\"maxWidth\":1920,\"supportsCustomResolution\":true,\"supportsFps\":60,\"supportsHdr\":false,\"supportsHevc\":false,\"video\":{\"height\":1080,\"maxBitrateKbps\":20000,\"maxHeight\":1080,\"maxWidth\":1920,\"width\":1920}}","cv":"","id":"<id>","target":"/streaming/characteristics/clientdevicecapabilities","type":"Message"}"#
+            r#"{"content":"{\"maxBitrateKbps\":20000,\"maxHeight\":1080,\"maxWidth\":1920,\"supportsCustomResolution\":true,\"supportsFps\":240,\"supportsHdr\":false,\"supportsHevc\":false,\"video\":{\"height\":1080,\"maxBitrateKbps\":20000,\"maxHeight\":1080,\"maxWidth\":1920,\"width\":1920}}","cv":"","id":"<id>","target":"/streaming/characteristics/clientdevicecapabilities","type":"Message"}"#
         );
         assert_eq!(
             with_placeholder_id(sent[5]),

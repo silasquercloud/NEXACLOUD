@@ -352,6 +352,12 @@ fn streaming(ui: &mut Ui, s: &mut AppSettings, streaming_available: bool) -> boo
     }
     heading(ui, LABEL_FRAME_RATE, "");
     for (fps, title, subtitle) in [
+        (
+            240,
+            "240 fps",
+            "Performance build: highest requested frame rate",
+        ),
+        (120, "120 fps", "Performance build: high refresh displays"),
         (60, "60 fps", "Smoothest motion"),
         (30, "30 fps", "Less bandwidth on weaker connections"),
     ] {

@@ -311,8 +311,10 @@ pub fn normalize_upscaler(name: &str) -> String {
 /// The wgpu present mode for an `AppSettings::present_mode` value (`None` when unknown).
 pub fn present_mode_from_name(name: &str) -> Option<wgpu::PresentMode> {
     match name.trim().to_ascii_lowercase().as_str() {
-        "fifo" | "vsync" => Some(wgpu::PresentMode::Fifo),
-        "immediate" => Some(wgpu::PresentMode::Immediate),
+        // Auto* variants pick the closest supported mode, so the app also starts on
+        // surfaces that only advertise Fifo (common on Linux/Wayland software renderers).
+        "fifo" | "vsync" => Some(wgpu::PresentMode::AutoVsync),
+        "immediate" => Some(wgpu::PresentMode::AutoNoVsync),
         _ => None,
     }
 }
@@ -592,11 +594,11 @@ mod tests {
     fn present_mode_names() {
         assert_eq!(
             present_mode_from_name("fifo"),
-            Some(wgpu::PresentMode::Fifo)
+            Some(wgpu::PresentMode::AutoVsync)
         );
         assert_eq!(
             present_mode_from_name("Immediate"),
-            Some(wgpu::PresentMode::Immediate)
+            Some(wgpu::PresentMode::AutoNoVsync)
         );
         assert_eq!(present_mode_from_name("mailbox"), None);
         assert_eq!(normalize_present_mode("FIFO"), "fifo");

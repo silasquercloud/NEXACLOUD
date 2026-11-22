@@ -9,7 +9,6 @@
 //! error, sign-out) opens the browser again through the view's opener
 //! (`open::that_detached` on a helper thread by default, a recording closure in tests).
 
-use std::process::Command;
 use std::sync::Arc;
 
 use egui::{Rect, RichText, Ui, pos2, vec2};
@@ -22,9 +21,9 @@ use crate::ui::kit::{Button, Tone};
 /// Opens a URL in the system browser (`Qt.openUrlExternally`).
 pub type UrlOpener = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Opens the sign-in page in Chromium. The auth service reads the redirect URL
-/// from Chromium's history, so using a fixed browser keeps the detection reliable
-/// even when another browser is the system default. Runs on a helper thread so the
+/// Opens the sign-in page in the system default browser (Chrome, Edge, Firefox,
+/// Chromium, …). The auth service reads the redirect from all common browser
+/// histories, so no fixed executable is required. Runs on a helper thread so the
 /// egui frame never waits on the browser launcher.
 fn system_opener() -> UrlOpener {
     Arc::new(|url: &str| {
@@ -32,20 +31,8 @@ fn system_opener() -> UrlOpener {
         let spawned = std::thread::Builder::new()
             .name("open-sign-in-page".into())
             .spawn(move || {
-                let chromium = Command::new("chromium")
-                    .arg("--new-window")
-                    .arg(&url)
-                    .spawn();
-                match chromium {
-                    Ok(mut child) => {
-                        let _ = child.wait();
-                    }
-                    Err(error) => {
-                        tracing::warn!(target: "Auth", "chromium failed ({error}); trying default browser");
-                        if let Err(error) = open::that_detached(&url) {
-                            tracing::warn!(target: "Auth", "could not open sign-in page {url}: {error}");
-                        }
-                    }
+                if let Err(error) = open::that_detached(&url) {
+                    tracing::warn!(target: "Auth", "could not open sign-in page {url}: {error}");
                 }
             });
         if let Err(err) = spawned {

@@ -1061,8 +1061,13 @@ impl StreamView {
         self.hud
             .show_snapshot_for_path(ui, area, &snapshot, self.cpu_fallback);
 
-        if self.menu_open && connected {
-            self.show_menu(ui, area, &snapshot, &ctx);
+        let menu_openness = ctx.animate_bool_with_time(
+            self.id.with("f1_menu_slide"),
+            self.menu_open && connected,
+            0.22,
+        );
+        if menu_openness > 0.001 {
+            self.show_menu(ui, area, &snapshot, &ctx, menu_openness);
         }
 
         if connected && !self.input_focused() && !self.menu_open {
@@ -1070,17 +1075,41 @@ impl StreamView {
         }
     }
 
-    /// The in-game overlay menu (F1). Gamepad-only session info and quick toggles;
-    /// keyboard/mouse remain free to drive this app's own menus.
-    fn show_menu(&mut self, ui: &mut egui::Ui, area: Rect, snapshot: &StreamSnapshot, ctx: &egui::Context) {
+    /// Mutates the persisted settings and re-applies them to the live stream controller.
+    fn apply_settings(&self, change: impl FnOnce(&mut AppSettings)) {
+        let mut settings = self.settings.write();
+        change(&mut settings);
+        let updated = settings.clone();
+        drop(settings);
+        self.stream.send(StreamCommand::ApplySettings(updated));
+    }
+
+    /// The in-game overlay menu (F1). In this performance build it slides in from the
+    /// left edge and exposes frame rate, VSync and all upscaler options directly.
+    fn show_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        area: Rect,
+        snapshot: &StreamSnapshot,
+        ctx: &egui::Context,
+        openness: f32,
+    ) {
         // Keep the session timer ticking while the menu is open.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        let width = 360.0_f32.min(area.width() - 24.0);
-        let height = 344.0_f32.min(area.height() - 24.0);
-        let rect = Rect::from_center_size(area.center(), vec2(width, height));
+        let width = 420.0_f32.min(area.width() - 24.0);
+        let height = 600.0_f32.min(area.height() - 24.0);
+        let target_left = area.left() + 16.0;
+        let top = area.top() + ((area.height() - height) / 2.0).max(12.0);
+        let hidden_left = area.left() - width - 12.0;
+        let left = hidden_left + (target_left - hidden_left) * openness;
+        let rect = Rect::from_min_size(pos2(left, top), vec2(width, height));
 
-        ui.painter().rect_filled(area, 0.0, Color32::from_black_alpha(165));
+        ui.painter().rect_filled(
+            area,
+            0.0,
+            Color32::from_black_alpha((165.0 * openness) as u8),
+        );
         ui.painter().rect_filled(
             rect,
             CornerRadius::same(16),
@@ -1093,154 +1122,301 @@ impl StreamView {
             egui::StrokeKind::Inside,
         );
 
+        let settings = self.settings.read().clone();
         let mut child = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(rect)
+                .max_rect(rect.shrink2(vec2(0.0, 8.0)))
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        child.add_space(14.0);
 
-        // Header.
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            h.label(
-                egui::RichText::new("NexaCloud")
-                    .size(20.0)
-                    .strong()
-                    .color(theme::TEXT_PRIMARY),
-            );
-            h.add_space(8.0);
-            h.label(
-                egui::RichText::new("MENU")
-                    .size(10.0)
-                    .strong()
-                    .color(theme::ON_ACCENT)
-                    .background_color(theme::ACCENT),
-            );
-            h.add_space(8.0);
-            h.label(egui::RichText::new("F1").size(12.0).color(theme::TEXT_TERTIARY));
-        });
-        child.add_space(4.0);
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            h.label(
-                egui::RichText::new(&snapshot.title_name)
-                    .size(12.0)
-                    .color(theme::TEXT_SECONDARY),
-            );
-        });
-        child.add_space(10.0);
-        child.separator();
-        child.add_space(10.0);
+        egui::ScrollArea::vertical()
+            .id_salt("f1_performance_menu")
+            .auto_shrink([false, false])
+            .show(&mut child, |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 4.0);
+                ui.add_space(6.0);
 
-        // Session card: big timer + negotiated stream details.
-        let elapsed = self.session_start.map(|s| s.elapsed()).unwrap_or_default();
-        let secs = elapsed.as_secs();
-        let timer = format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60);
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            h.label(egui::RichText::new("TEMPO DE SESSÃO").size(10.0).strong().color(theme::TEXT_TERTIARY));
-            h.add_space(10.0);
-            h.label(egui::RichText::new(&timer).size(22.0).strong().color(theme::ACCENT));
-        });
-        child.add_space(4.0);
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            h.label(
-                egui::RichText::new(format!(
-                    "{}×{}  ·  {:.0} fps  ·  {:.1} Mbps",
-                    snapshot.stats.negotiated_width,
-                    snapshot.stats.negotiated_height,
-                    snapshot.stats.frames_per_second,
-                    snapshot.bitrate_mbps(),
-                ))
-                .size(11.0)
-                .color(theme::TEXT_SECONDARY),
-            );
-        });
-        child.add_space(10.0);
-        child.separator();
-        child.add_space(8.0);
+                // Header.
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    h.label(
+                        egui::RichText::new("NexaCloud")
+                            .size(20.0)
+                            .strong()
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                    h.add_space(8.0);
+                    h.label(
+                        egui::RichText::new("PERF")
+                            .size(10.0)
+                            .strong()
+                            .color(theme::ON_ACCENT)
+                            .background_color(theme::ACCENT),
+                    );
+                    h.add_space(8.0);
+                    h.label(
+                        egui::RichText::new("F1")
+                            .size(12.0)
+                            .color(theme::TEXT_TERTIARY),
+                    );
+                });
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    h.label(
+                        egui::RichText::new(&snapshot.title_name)
+                            .size(12.0)
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.separator();
 
-        // Quick toggles. These do not touch the proven stream negotiation defaults.
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            if h
-                .button(egui::RichText::new(if snapshot.hud_enabled {
-                    "Estatísticas  ON"
-                } else {
-                    "Estatísticas  OFF"
-                }))
-                .clicked()
-            {
-                self.stream
-                    .send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
-            }
-            h.add_space(8.0);
-            let upscale = self.settings.read().upscale_enabled;
-            if h
-                .button(egui::RichText::new(if upscale { "Upscale  ON" } else { "Upscale  OFF" }))
-                .clicked()
-            {
-                {
-                    let mut settings = self.settings.write();
-                    settings.upscale_enabled = !upscale;
+                // Session card.
+                let elapsed = self.session_start.map(|s| s.elapsed()).unwrap_or_default();
+                let secs = elapsed.as_secs();
+                let timer = format!(
+                    "{:02}:{:02}:{:02}",
+                    secs / 3600,
+                    (secs / 60) % 60,
+                    secs % 60
+                );
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    h.label(
+                        egui::RichText::new("TEMPO DE SESSÃO")
+                            .size(10.0)
+                            .strong()
+                            .color(theme::TEXT_TERTIARY),
+                    );
+                    h.add_space(10.0);
+                    h.label(
+                        egui::RichText::new(&timer)
+                            .size(20.0)
+                            .strong()
+                            .color(theme::ACCENT),
+                    );
+                });
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    h.label(
+                        egui::RichText::new(format!(
+                            "{}×{}  ·  {:.0} fps  ·  {:.1} Mbps",
+                            snapshot.stats.negotiated_width,
+                            snapshot.stats.negotiated_height,
+                            snapshot.stats.frames_per_second,
+                            snapshot.bitrate_mbps(),
+                        ))
+                        .size(11.0)
+                        .color(theme::TEXT_SECONDARY),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.separator();
+
+                // Frame rate.
+                ui.add_space(4.0);
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    h.label(
+                        egui::RichText::new("FPS SOLICITADO")
+                            .size(11.0)
+                            .strong()
+                            .color(theme::TEXT_TERTIARY),
+                    );
+                });
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    for (fps, label) in [(240, "240"), (120, "120"), (60, "60"), (30, "30")] {
+                        let active = settings.preferred_frame_rate == fps;
+                        let button =
+                            egui::Button::new(egui::RichText::new(label).strong().color(
+                                if active {
+                                    theme::ON_ACCENT
+                                } else {
+                                    theme::TEXT_PRIMARY
+                                },
+                            ))
+                            .fill(if active {
+                                theme::ACCENT
+                            } else {
+                                theme::SURFACE_HIGH
+                            });
+                        if h.add(button).clicked() {
+                            self.apply_settings(|s| s.preferred_frame_rate = fps);
+                        }
+                    }
+                });
+
+                // VSync / present mode.
+                ui.add_space(4.0);
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    let vsync =
+                        crate::settings::normalize_present_mode(&settings.present_mode) == "fifo";
+                    let label = if vsync {
+                        "VSync  ON  ·  fifo"
+                    } else {
+                        "VSync  OFF  ·  immediate"
+                    };
+                    if h.button(egui::RichText::new(label).strong()).clicked() {
+                        self.apply_settings(|s| {
+                            s.present_mode = if vsync { "immediate" } else { "fifo" }.to_owned()
+                        });
+                    }
+                });
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    h.label(
+                        egui::RichText::new("VSync é aplicado ao reiniciar o app.")
+                            .size(10.0)
+                            .color(theme::TEXT_TERTIARY),
+                    );
+                });
+
+                ui.add_space(6.0);
+                ui.separator();
+
+                // Upscaling.
+                ui.add_space(4.0);
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    h.label(
+                        egui::RichText::new("UPSCALE / RESOLUÇÃO")
+                            .size(11.0)
+                            .strong()
+                            .color(theme::TEXT_TERTIARY),
+                    );
+                });
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    let label = if settings.upscale_enabled {
+                        "Upscale  ON"
+                    } else {
+                        "Upscale  OFF"
+                    };
+                    if h.button(egui::RichText::new(label).strong()).clicked() {
+                        self.apply_settings(|s| s.upscale_enabled = !settings.upscale_enabled);
+                    }
+                });
+                if settings.upscale_enabled {
+                    let upscaler = crate::settings::normalize_upscaler(&settings.upscaler);
+                    ui.horizontal(|h| {
+                        h.add_space(18.0);
+                        for (value, label) in [("fsr", "FSR 1.0"), ("metalfx", "MetalFX")] {
+                            let active = upscaler == value;
+                            let button =
+                                egui::Button::new(egui::RichText::new(label).color(if active {
+                                    theme::ON_ACCENT
+                                } else {
+                                    theme::TEXT_PRIMARY
+                                }))
+                                .fill(if active {
+                                    theme::ACCENT
+                                } else {
+                                    theme::SURFACE_HIGH
+                                });
+                            if h.add(button).clicked() && !active {
+                                self.apply_settings(|s| s.upscaler = value.to_owned());
+                            }
+                        }
+                    });
+                    ui.horizontal(|h| {
+                        h.add_space(18.0);
+                        let mut height = settings.upscale_height;
+                        let previous = height;
+                        egui::ComboBox::from_id_salt("f1_upscale_output")
+                            .selected_text(match height {
+                                1080 => "Saída 1080p",
+                                1440 => "Saída 1440p",
+                                _ => "Saída 4K (2160p)",
+                            })
+                            .show_ui(h, |ui| {
+                                for (value, label) in [
+                                    (1080, "Saída 1080p"),
+                                    (1440, "Saída 1440p"),
+                                    (2160, "Saída 4K (2160p)"),
+                                ] {
+                                    ui.selectable_value(&mut height, value, label);
+                                }
+                            });
+                        if height != previous {
+                            self.apply_settings(|s| s.upscale_height = height);
+                        }
+                    });
+                    if upscaler == "fsr" {
+                        ui.horizontal(|h| {
+                            h.add_space(18.0);
+                            let mut sharpness = settings.sharpness;
+                            if super::settings_sheet::slider(
+                                h,
+                                &mut sharpness,
+                                0.0..=2.0,
+                                "Nitidez FSR",
+                                |v| format!("{v:.2}"),
+                            ) {
+                                self.apply_settings(|s| s.sharpness = sharpness);
+                            }
+                        });
+                    }
                 }
-                let settings = self.settings.read().clone();
-                self.stream.send(StreamCommand::ApplySettings(settings));
-            }
-        });
-        child.add_space(10.0);
-        child.separator();
-        child.add_space(8.0);
 
-        // Input status: the cloud PC gets gamepad reports only.
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            h.label(
-                egui::RichText::new("ENTRADA").size(10.0).strong().color(theme::TEXT_TERTIARY),
-            );
-        });
-        child.add_space(2.0);
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            let controller = if snapshot.controller_connected && !snapshot.controller_name.is_empty() {
-                snapshot.controller_name.clone()
-            } else {
-                "Controle virtual".to_owned()
-            };
-            h.label(
-                egui::RichText::new(format!("Controle  ·  {controller}"))
-                    .size(12.0)
-                    .color(theme::TEXT_PRIMARY),
-            );
-        });
-        child.add_space(2.0);
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            h.label(
-                egui::RichText::new("Teclado e mouse controlam apenas este app.")
-                    .size(10.0)
-                    .color(theme::TEXT_TERTIARY),
-            );
-        });
-        child.add_space(10.0);
+                ui.add_space(6.0);
+                ui.separator();
 
-        // Footer actions.
-        child.horizontal(|h| {
-            h.add_space(18.0);
-            if h
-                .button(egui::RichText::new("Sair da sessão").color(theme::DANGER))
-                .clicked()
-            {
-                self.stream.send(StreamCommand::StopStreaming);
-                self.menu_open = false;
-            }
-            h.add_space(8.0);
-            if h.button("Fechar (Esc)").clicked() {
-                self.menu_open = false;
-            }
-        });
+                // HUD + input.
+                ui.add_space(4.0);
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    let label = if snapshot.hud_enabled {
+                        "Estatísticas  ON"
+                    } else {
+                        "Estatísticas  OFF"
+                    };
+                    if h.button(label).clicked() {
+                        self.stream
+                            .send(StreamCommand::SetHudEnabled(!snapshot.hud_enabled));
+                    }
+                });
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    let controller =
+                        if snapshot.controller_connected && !snapshot.controller_name.is_empty() {
+                            snapshot.controller_name.clone()
+                        } else {
+                            "Controle virtual".to_owned()
+                        };
+                    h.label(
+                        egui::RichText::new(format!("Controle  ·  {controller}"))
+                            .size(12.0)
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                });
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    h.label(
+                        egui::RichText::new("Teclado e mouse controlam apenas este app.")
+                            .size(10.0)
+                            .color(theme::TEXT_TERTIARY),
+                    );
+                });
+                ui.add_space(10.0);
+
+                // Footer actions.
+                ui.horizontal(|h| {
+                    h.add_space(18.0);
+                    if h.button(egui::RichText::new("Sair da sessão").color(theme::DANGER))
+                        .clicked()
+                    {
+                        self.stream.send(StreamCommand::StopStreaming);
+                        self.menu_open = false;
+                    }
+                    h.add_space(8.0);
+                    if h.button("Fechar (Esc)").clicked() {
+                        self.menu_open = false;
+                    }
+                });
+                ui.add_space(8.0);
+            });
     }
 
     fn surface_id(&self) -> Id {

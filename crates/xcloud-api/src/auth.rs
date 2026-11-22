@@ -108,30 +108,97 @@ pub struct InteractiveLogin {
     state: String,
 }
 
-/// Chromium profile history databases, newest first. Only these are inspected,
-/// and only for the exact xbox.com sign-in redirect URL.
-fn chromium_history_files() -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-    let base = PathBuf::from(home).join(".config/chromium");
+/// Browser history databases, newest first. The sign-in page is opened with the
+/// system default browser, so every common Chromium profile and Firefox profile is
+/// inspected — not just Chromium. Only the exact xbox.com redirect URL is read.
+fn browser_history_files() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    if cfg!(windows) {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let local = PathBuf::from(local);
+            roots.push(local.join("Google\\Chrome\\User Data"));
+            roots.push(local.join("Microsoft\\Edge\\User Data"));
+            roots.push(local.join("BraveSoftware\\Brave-Browser\\User Data"));
+            roots.push(local.join("Vivaldi\\User Data"));
+            roots.push(local.join("Opera Software\\Opera Stable"));
+        }
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            roots.push(PathBuf::from(appdata).join("Mozilla\\Firefox\\Profiles"));
+        }
+    } else {
+        if let Ok(home) = std::env::var("HOME") {
+            let home = PathBuf::from(home);
+            roots.push(home.join(".config/chromium"));
+            roots.push(home.join(".config/google-chrome"));
+            roots.push(home.join(".config/microsoft-edge"));
+            roots.push(home.join(".config/BraveSoftware/Brave-Browser"));
+            roots.push(home.join(".config/vivaldi"));
+            roots.push(home.join(".mozilla/firefox"));
+        }
+    }
+
     let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&base) {
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else { continue };
         for entry in entries.flatten() {
-            let candidate = entry.path().join("History");
-            if candidate.is_file() {
-                files.push(candidate);
+            let path = entry.path();
+            // Chrome-style roots contain one directory per profile; Opera stores the
+            // database directly in the root directory.
+            let candidates = if path.is_dir() {
+                vec![path.join("History"), path.join("places.sqlite")]
+            } else {
+                Vec::new()
+            };
+            for candidate in candidates {
+                if candidate.is_file() {
+                    files.push(candidate);
+                }
+            }
+            for name in ["History", "places.sqlite"] {
+                let candidate = root.join(name);
+                if candidate.is_file() {
+                    files.push(candidate);
+                }
             }
         }
     }
+
     files.sort_by_key(|path| {
         std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .ok()
     });
     files.reverse();
+    files.dedup();
     files
 }
 
-/// Read the newest `blank.html?code=...` URL from one Chromium history database.
+/// Find a usable Python 3 executable. Windows commonly exposes it as `py -3` or
+/// `python`, Linux as `python3`; the browser-history query is the only Python use.
+fn python_command() -> Option<Command> {
+    let candidates: &[(&str, &[&str])] = if cfg!(windows) {
+        &[("py", &["-3"]), ("python", &[]), ("python3", &[])]
+    } else {
+        &[("python3", &[]), ("python", &[])]
+    };
+    for (program, prefix) in candidates {
+        let mut probe = Command::new(program);
+        probe.args(*prefix).arg("--version");
+        if probe
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            let mut command = Command::new(program);
+            command.args(*prefix);
+            return Some(command);
+        }
+    }
+    None
+}
+
+/// Read the newest `blank.html?code=...` URL from one browser history database.
 /// The copy (including WAL) keeps SQLite from fighting the running browser.
 fn latest_auth_callback(
     history: &Path,
@@ -153,30 +220,37 @@ for suffix in ("", "-wal", "-shm"):
         pass
 con = sqlite3.connect(dst)
 try:
-    rows = con.execute(
-        "select url from urls where url like ? order by last_visit_time desc limit 30",
-        ("https://www.xbox.com/auth/msa/blank.html?%",),
-    ).fetchall()
+    rows = []
+    for table, column in (("urls", "last_visit_time"), ("moz_places", "last_visit_date")):
+        try:
+            rows.extend(con.execute(
+                "select url from " + table + " where url like ? order by " + column + " desc limit 30",
+                ("https://www.xbox.com/auth/msa/blank.html?%",),
+            ).fetchall())
+        except sqlite3.Error:
+            pass
 finally:
     con.close()
 print(json.dumps([row[0] for row in rows]))
 "#;
 
-    let output = Command::new("python3")
+    let mut command = python_command()
+        .ok_or_else(|| Error::Auth("Python 3 is required to read browser history".to_owned()))?;
+    let output = command
         .arg("-c")
         .arg(SCRIPT)
         .arg(history)
         .arg(scratch)
         .output()
-        .map_err(|e| Error::Auth(format!("Cannot read Chromium history: {e}")))?;
+        .map_err(|e| Error::Auth(format!("Cannot read browser history: {e}")))?;
     if !output.status.success() {
         return Err(Error::Auth(format!(
-            "Chromium history query failed: {}",
+            "Browser history query failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
     let urls: Vec<String> = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-        .map_err(|e| Error::Auth(format!("Invalid Chromium history result: {e}")))?;
+        .map_err(|e| Error::Auth(format!("Invalid browser history result: {e}")))?;
     for url in urls {
         let Ok(parsed) = url::Url::parse(&url) else { continue };
         let mut state = "";
@@ -234,7 +308,7 @@ impl MicrosoftAuthService {
     /// Start an interactive browser sign-in with the xbox.com web client: build the
     /// Microsoft authorize URL with PKCE and a random state. The browser does the
     /// sign-in and redirects to `https://www.xbox.com/auth/msa/blank.html?code=...`;
-    /// [`Self::wait_for_interactive_code`] reads that URL from Chromium's history.
+    /// [`Self::wait_for_interactive_code`] reads that URL from the browser history.
     pub fn begin_interactive_login(&self) -> Result<InteractiveLogin> {
         // 96 hex characters: a valid PKCE verifier (43-128 unreserved characters).
         let verifier = format!(
@@ -271,7 +345,7 @@ impl MicrosoftAuthService {
         })
     }
 
-    /// Poll Chromium's history for the xbox.com redirect that carries the code.
+    /// Poll the browser histories for the xbox.com redirect that carries the code.
     /// The URL is only read after the user completes the normal Microsoft sign-in,
     /// so there is no code to type and no device-code approval.
     pub async fn wait_for_interactive_code(
@@ -287,10 +361,10 @@ impl MicrosoftAuthService {
         if let Err(error) = std::fs::create_dir_all(&scratch) {
             tracing::warn!(target: LOG_TARGET, error = %error, "cannot create history scratch dir");
         }
-        tracing::info!(target: LOG_TARGET, "waiting for the xbox.com sign-in redirect in Chromium");
+        tracing::info!(target: LOG_TARGET, "waiting for the xbox.com sign-in redirect in browser history");
 
         loop {
-            for history in chromium_history_files() {
+            for history in browser_history_files() {
                 match latest_auth_callback(&history, &scratch, &login.state) {
                     Ok(Some(code)) => {
                         let _ = std::fs::remove_dir_all(&scratch);
@@ -303,7 +377,7 @@ impl MicrosoftAuthService {
             if Instant::now() >= deadline {
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(Error::Timeout(
-                    "Browser sign-in timed out. Check that Chromium opened the Microsoft page and finish signing in."
+                    "Browser sign-in timed out. Finish signing in in the browser that opened."
                         .to_owned(),
                 ));
             }

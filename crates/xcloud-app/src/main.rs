@@ -75,8 +75,10 @@ enum PresentArg {
 impl From<PresentArg> for wgpu::PresentMode {
     fn from(arg: PresentArg) -> Self {
         match arg {
-            PresentArg::Fifo => wgpu::PresentMode::Fifo,
-            PresentArg::Immediate => wgpu::PresentMode::Immediate,
+            // Auto* modes fall back gracefully when a backend does not expose the
+            // exact mode (some Linux/Wayland surfaces only support Fifo).
+            PresentArg::Fifo => wgpu::PresentMode::AutoVsync,
+            PresentArg::Immediate => wgpu::PresentMode::AutoNoVsync,
         }
     }
 }
@@ -367,11 +369,11 @@ mod tests {
         assert_eq!(cli.present, Some(PresentArg::Fifo));
         assert_eq!(
             wgpu::PresentMode::from(PresentArg::Fifo),
-            wgpu::PresentMode::Fifo
+            wgpu::PresentMode::AutoVsync
         );
         assert_eq!(
             wgpu::PresentMode::from(PresentArg::Immediate),
-            wgpu::PresentMode::Immediate
+            wgpu::PresentMode::AutoNoVsync
         );
         assert!(Cli::try_parse_from(["xcloud-app", "--present", "mailbox"]).is_err());
     }
