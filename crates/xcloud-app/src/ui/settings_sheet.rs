@@ -374,7 +374,11 @@ fn streaming(ui: &mut Ui, s: &mut AppSettings, streaming_available: bool) -> boo
             let mut off = vsync_off;
             let resp = kit::toggle(ui, &mut off, "VSync desligado").changed();
             if resp {
-                s.present_mode = if off { "off".into() } else { "immediate".into() };
+                s.present_mode = if off {
+                    "off".into()
+                } else {
+                    "immediate".into()
+                };
             }
             resp
         },
@@ -537,9 +541,16 @@ fn video(ui: &mut Ui, s: &mut AppSettings) -> bool {
         "Preenche a tela ignorando proporcao (stretch)",
         |ui| kit::toggle(ui, &mut s.stretch_video, "Esticar imagem").changed(),
     );
-    if kit::setting_row(ui, "Zoom da imagem", "Ajusta o zoom/proporcao dentro do jogo", |ui| {
-        slider(ui, &mut s.video_zoom, 0.5..=3.0, "Zoom da imagem", |v| format!("{v:.2}x"))
-    }) {
+    if kit::setting_row(
+        ui,
+        "Zoom da imagem",
+        "Ajusta o zoom/proporcao dentro do jogo",
+        |ui| {
+            slider(ui, &mut s.video_zoom, 0.5..=3.0, "Zoom da imagem", |v| {
+                format!("{v:.2}x")
+            })
+        },
+    ) {
         changed = true;
     }
     changed

@@ -258,7 +258,11 @@ impl SettingsFile {
             licensed_only: self.library.licensed_only.unwrap_or(d.licensed_only),
             native_mkb: self.input.native_mkb.unwrap_or(d.native_mkb),
             stretch_video: self.render.stretch_video.unwrap_or(d.stretch_video),
-            video_zoom: self.render.video_zoom.unwrap_or(d.video_zoom).clamp(0.5, 3.0),
+            video_zoom: self
+                .render
+                .video_zoom
+                .unwrap_or(d.video_zoom)
+                .clamp(0.5, 3.0),
             show_stats: self.render.show_stats.unwrap_or(d.show_stats),
         }
     }
@@ -546,6 +550,10 @@ mod tests {
             upscaler: "metalfx".into(),
             hardware_decode: true,
             licensed_only: true,
+            native_mkb: true,
+            stretch_video: true,
+            video_zoom: 1.25,
+            show_stats: true,
         };
         let parsed = from_json(&to_json(&settings)).expect("valid json");
         assert_eq!(parsed, settings);
@@ -642,7 +650,10 @@ mod tests {
             present_mode_from_name("Immediate"),
             Some(wgpu::PresentMode::Immediate)
         );
-        assert_eq!(present_mode_from_name("mailbox"), Some(wgpu::PresentMode::Mailbox));
+        assert_eq!(
+            present_mode_from_name("mailbox"),
+            Some(wgpu::PresentMode::Mailbox)
+        );
         assert_eq!(normalize_present_mode("FIFO"), "fifo");
         assert_eq!(normalize_present_mode("off"), "off");
         assert_eq!(normalize_present_mode("whatever"), "immediate");
