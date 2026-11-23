@@ -475,7 +475,13 @@ impl GpuVideo {
     }
 
     /// Draws the latest output into `available`.
-    fn draw(&self, painter: &egui::Painter, available: Rect, output: VideoOutput, settings: &AppSettings) -> Rect {
+    fn draw(
+        &self,
+        painter: &egui::Painter,
+        available: Rect,
+        output: VideoOutput,
+        settings: &AppSettings,
+    ) -> Rect {
         let rect = video_display_rect(available, output.width, output.height, settings);
         self.texture.draw_rect(painter, rect);
         rect
@@ -684,7 +690,13 @@ impl CpuVideo {
     }
 
     /// Draws the uploaded frame into `available`.
-    fn draw(&self, painter: &egui::Painter, available: Rect, output: VideoOutput, settings: &AppSettings) -> Rect {
+    fn draw(
+        &self,
+        painter: &egui::Painter,
+        available: Rect,
+        output: VideoOutput,
+        settings: &AppSettings,
+    ) -> Rect {
         let rect = video_display_rect(available, output.width, output.height, settings);
         if let Some(texture) = &self.texture {
             painter.image(
@@ -1108,14 +1120,20 @@ impl StreamView {
                 let mut f8 = false;
                 let mut f11 = false;
                 for ev in &i.events {
-                    if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = ev {
-                        if modifiers.is_none() || *modifiers == Modifiers::NONE {
-                            match key {
-                                Key::F1 => f1 = true,
-                                Key::F8 => f8 = true,
-                                Key::F11 => f11 = true,
-                                _ => {}
-                            }
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } = ev
+                        && (modifiers.is_none() || *modifiers == Modifiers::NONE)
+                    {
+                        match key {
+                            Key::F1 => f1 = true,
+                            Key::F8 => f8 = true,
+                            Key::F11 => f11 = true,
+                            _ => {}
                         }
                     }
                 }
@@ -1823,9 +1841,16 @@ impl StreamView {
     fn show_quick_menu(&mut self, ui: &mut egui::Ui, area: Rect, ctx: &egui::Context) {
         let panel_w = 340.0_f32.min(area.width() * 0.42).max(280.0);
         let panel = Rect::from_min_max(area.min, pos2(area.min.x + panel_w, area.max.y));
-        ui.painter().rect_filled(panel, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(18, 12, 28, 242));
+        ui.painter().rect_filled(
+            panel,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(18, 12, 28, 242),
+        );
         ui.painter().line_segment(
-            [pos2(panel.max.x, panel.min.y), pos2(panel.max.x, panel.max.y)],
+            [
+                pos2(panel.max.x, panel.min.y),
+                pos2(panel.max.x, panel.max.y),
+            ],
             egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.45)),
         );
 
@@ -1834,63 +1859,122 @@ impl StreamView {
         let mut close_menu = false;
         let mut stop = false;
 
-        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(panel.shrink2(vec2(18.0, 20.0))));
+        let mut child_ui =
+            ui.new_child(egui::UiBuilder::new().max_rect(panel.shrink2(vec2(18.0, 20.0))));
         child_ui.vertical(|ui| {
-            ui.label(egui::RichText::new("NexaCloud Menu").font(theme::font_w(28.0, theme::Weight::Bold)).color(theme::TEXT_PRIMARY));
+            ui.label(
+                egui::RichText::new("NexaCloud Menu")
+                    .font(theme::font_w(28.0, theme::Weight::Bold))
+                    .color(theme::TEXT_PRIMARY),
+            );
             ui.add_space(4.0);
-            ui.label(egui::RichText::new("F1 abre/fecha • F8 trava mouse/teclado • F11 tela cheia • Esc solta ponteiro").font(theme::font(12.5)).color(theme::TEXT_SECONDARY));
+            ui.label(
+                egui::RichText::new(
+                    "F1 abre/fecha • F8 trava mouse/teclado • F11 tela cheia • Esc solta ponteiro",
+                )
+                .font(theme::font(12.5))
+                .color(theme::TEXT_SECONDARY),
+            );
             ui.add_space(14.0);
 
-            if kit::Button::new("Voltar ao jogo").icon(icons::Icon::Play).primary().min_width(220.0).show(ui).clicked() {
+            if kit::Button::new("Voltar ao jogo")
+                .icon(icons::Icon::Play)
+                .primary()
+                .min_width(220.0)
+                .show(ui)
+                .clicked()
+            {
                 close_menu = true;
             }
             ui.add_space(8.0);
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-            let fs_label = if fs { "Sair da tela cheia" } else { "Tela cheia (F11)" };
-            let fs_icon = if fs { icons::Icon::ExitFullscreen } else { icons::Icon::Fullscreen };
-            if kit::Button::new(fs_label).icon(fs_icon).tone(kit::Tone::Glass).min_width(220.0).show(ui).clicked() {
+            let fs_label = if fs {
+                "Sair da tela cheia"
+            } else {
+                "Tela cheia (F11)"
+            };
+            let fs_icon = if fs {
+                icons::Icon::ExitFullscreen
+            } else {
+                icons::Icon::Fullscreen
+            };
+            if kit::Button::new(fs_label)
+                .icon(fs_icon)
+                .tone(kit::Tone::Glass)
+                .min_width(220.0)
+                .show(ui)
+                .clicked()
+            {
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(!fs));
             }
             ui.add_space(8.0);
-            if kit::Button::new("Sair do stream").icon(icons::Icon::Close).tone(kit::Tone::Secondary).min_width(220.0).show(ui).clicked() {
+            if kit::Button::new("Sair do stream")
+                .icon(icons::Icon::Close)
+                .tone(kit::Tone::Secondary)
+                .min_width(220.0)
+                .show(ui)
+                .clicked()
+            {
                 stop = true;
             }
 
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(10.0);
-            ui.label(egui::RichText::new("Overlay / imagem").font(theme::font_w(16.0, theme::Weight::Semibold)).color(theme::TEXT_PRIMARY));
+            ui.label(
+                egui::RichText::new("Overlay / imagem")
+                    .font(theme::font_w(16.0, theme::Weight::Semibold))
+                    .color(theme::TEXT_PRIMARY),
+            );
             ui.add_space(8.0);
 
-            changed |= kit::setting_row(ui, "Mostrar estatisticas", "Overlay de performance/estatisticas", |ui| {
-                kit::toggle(ui, &mut settings.show_stats, "Mostrar estatisticas").changed()
-            });
+            changed |= kit::setting_row(
+                ui,
+                "Mostrar estatisticas",
+                "Overlay de performance/estatisticas",
+                |ui| kit::toggle(ui, &mut settings.show_stats, "Mostrar estatisticas").changed(),
+            );
             changed |= kit::setting_row(ui, "HUD legado", "HUD antigo do stream", |ui| {
                 let r = kit::toggle(ui, &mut settings.hud_enabled, "HUD legado").changed();
-                if r { self.stream.send(StreamCommand::SetHudEnabled(settings.hud_enabled)); }
+                if r {
+                    self.stream
+                        .send(StreamCommand::SetHudEnabled(settings.hud_enabled));
+                }
                 r
             });
-            changed |= kit::setting_row(ui, "Esticar imagem", "Preenche a tela ignorando proporcao", |ui| {
-                kit::toggle(ui, &mut settings.stretch_video, "Esticar imagem").changed()
-            });
+            changed |= kit::setting_row(
+                ui,
+                "Esticar imagem",
+                "Preenche a tela ignorando proporcao",
+                |ui| kit::toggle(ui, &mut settings.stretch_video, "Esticar imagem").changed(),
+            );
             let mut zoom = settings.video_zoom;
             if kit::setting_row(ui, "Zoom da imagem", "Ajusta proporcao/zoom", |ui| {
-                let r = ui.add(egui::Slider::new(&mut zoom, 0.5..=3.0).text("")).changed();
-                r
+                ui.add(egui::Slider::new(&mut zoom, 0.5..=3.0).text(""))
+                    .changed()
             }) {
                 settings.video_zoom = zoom;
                 changed = true;
             }
-            ui.label(egui::RichText::new(format!("Zoom: {:.2}x", settings.video_zoom)).font(theme::font(12.5)).color(theme::TEXT_SECONDARY));
+            ui.label(
+                egui::RichText::new(format!("Zoom: {:.2}x", settings.video_zoom))
+                    .font(theme::font(12.5))
+                    .color(theme::TEXT_SECONDARY),
+            );
 
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(10.0);
-            ui.label(egui::RichText::new("Controles").font(theme::font_w(16.0, theme::Weight::Semibold)).color(theme::TEXT_PRIMARY));
+            ui.label(
+                egui::RichText::new("Controles")
+                    .font(theme::font_w(16.0, theme::Weight::Semibold))
+                    .color(theme::TEXT_PRIMARY),
+            );
             ui.add_space(8.0);
-            changed |= kit::setting_row(ui, "Native MKB", "Teclado/mouse nativos (F8 trava)", |ui| {
-                kit::toggle(ui, &mut settings.native_mkb, "Native MKB").changed()
-            });
+            changed |=
+                kit::setting_row(ui, "Native MKB", "Teclado/mouse nativos (F8 trava)", |ui| {
+                    kit::toggle(ui, &mut settings.native_mkb, "Native MKB").changed()
+                });
         });
 
         if changed {
@@ -1903,12 +1987,11 @@ impl StreamView {
             self.stream.send(StreamCommand::StopStreaming);
         } else if close_menu {
             self.quick_menu = false;
-        } else if ctx.input(|i| i.pointer.any_click()) {
-            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                if !panel.contains(pos) {
-                    self.quick_menu = false;
-                }
-            }
+        } else if ctx.input(|i| i.pointer.any_click())
+            && let Some(pos) = ctx.input(|i| i.pointer.interact_pos())
+            && !panel.contains(pos)
+        {
+            self.quick_menu = false;
         }
     }
 
