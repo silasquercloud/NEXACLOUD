@@ -2188,6 +2188,7 @@ mod tests {
     #[test]
     fn key_press_sends_set_key_and_release() {
         let Fixture { mut view, rx, .. } = fixture(connected());
+        view.settings.write().native_mkb = false;
         let mut h = harness(&mut view);
         h.run();
         drain(&rx);
@@ -2251,6 +2252,7 @@ mod tests {
     #[test]
     fn modifier_keys_arrive_as_physical_keys() {
         let Fixture { mut view, rx, .. } = fixture(connected());
+        view.settings.write().native_mkb = false;
         let mut h = harness(&mut view);
         h.run();
         drain(&rx);
@@ -2274,7 +2276,10 @@ mod tests {
 
     #[test]
     fn r_and_f_drive_the_triggers() {
-        let Fixture { mut view, rx, .. } = fixture(connected());
+        let mut s = connected();
+        s.input_focused = true;
+        let Fixture { mut view, rx, .. } = fixture(s);
+        view.settings.write().native_mkb = false;
         let mut h = harness(&mut view);
         h.run();
         drain(&rx);
@@ -2307,7 +2312,10 @@ mod tests {
 
     #[test]
     fn wasd_sums_into_the_left_stick() {
-        let Fixture { mut view, rx, .. } = fixture(connected());
+        let mut s = connected();
+        s.input_focused = true;
+        let Fixture { mut view, rx, .. } = fixture(s);
+        view.settings.write().native_mkb = false;
         let mut h = harness(&mut view);
         h.run();
         drain(&rx);
@@ -2339,6 +2347,7 @@ mod tests {
     #[test]
     fn key_repeats_and_unmapped_keys_do_nothing() {
         let Fixture { mut view, rx, .. } = fixture(connected());
+        view.settings.write().native_mkb = false;
         let mut h = harness(&mut view);
         h.run();
         drain(&rx);
@@ -2362,6 +2371,7 @@ mod tests {
     #[test]
     fn controller_keys_are_consumed_before_egui_sees_them() {
         let Fixture { mut view, rx, .. } = fixture(connected());
+        view.settings.write().native_mkb = false;
         let seen = Arc::new(parking_lot::Mutex::new(Vec::<Key>::new()));
         let seen_in_ui = Arc::clone(&seen);
         let mut h = builder().build_ui(move |ui| {
