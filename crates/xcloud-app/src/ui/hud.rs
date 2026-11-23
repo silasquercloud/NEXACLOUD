@@ -202,7 +202,7 @@ impl StreamHud {
     ) -> Option<Rect> {
         let now = ui.input(|i| i.time);
         self.history.borrow_mut().sample(now, s);
-        if !s.connected() {
+        if !Self::visible(s) {
             return None;
         }
         self.show_details(ui, area, s);

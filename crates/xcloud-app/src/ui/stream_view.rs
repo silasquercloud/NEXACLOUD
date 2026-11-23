@@ -1234,11 +1234,8 @@ impl StreamView {
             self.show_controls_overlay(ui, area, &snapshot, &ctx);
         }
 
-        let show_stats = settings.show_stats || settings.hud_enabled;
-        if show_stats {
-            self.hud
-                .show_snapshot_for_path(ui, area, &snapshot, self.cpu_fallback);
-        }
+        self.hud
+            .show_snapshot_for_path(ui, area, &snapshot, self.cpu_fallback);
 
         if connected && !self.input_focused() && !self.quick_menu {
             self.show_focus_hint(ui, area, &ctx);
